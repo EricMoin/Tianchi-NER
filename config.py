@@ -11,8 +11,10 @@ class Config:
     num_epochs: int
     device: str
     work_dir: str
+    freeze_bert_layers: int
+    num_prefix_tokens: int
 
-    def __init__(self, train_file: str, dev_file: str, test_file: str, output_file: str, model_name: str, batch_size: int, learning_rate: float, weight_decay: float, num_epochs: int, device: str, work_dir: str):
+    def __init__(self, train_file: str, dev_file: str, test_file: str, output_file: str, model_name: str, batch_size: int, learning_rate: float, weight_decay: float, num_epochs: int, device: str, work_dir: str, freeze_bert_layers: int, num_prefix_tokens: int):
         self.train_file = train_file
         self.dev_file = dev_file
         self.test_file = test_file
@@ -24,3 +26,5 @@ class Config:
         self.num_epochs = num_epochs
         self.device = device
         self.work_dir = work_dir
+        self.freeze_bert_layers = freeze_bert_layers
+        self.num_prefix_tokens = num_prefix_tokens

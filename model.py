@@ -3,43 +3,54 @@ from torch.utils.data import Dataset
 from TorchCRF import CRF
 from transformers import AutoModel, AutoTokenizer
 import torch
+import torch.nn.functional as F
 
 
 class AddressNER(nn.Module):
-    def __init__(self, pretrained_model_name, num_labels, max_position_embeddings=150):
+    def __init__(self, pretrained_model_name, num_labels, freeze_bert_layers=8, num_prefix_tokens=20):
         super(AddressNER, self).__init__()
         self.bert = AutoModel.from_pretrained(pretrained_model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
         self.lstm = nn.LSTM(
-            input_size=768 + 100,  # BERT hidden size + position embedding size
+            input_size=768,  # BERT hidden size
             hidden_size=256,
             num_layers=2,
             bidirectional=True,
             batch_first=True
         )
+
         self.dropout = nn.Dropout(0.1)
         self.classifier = nn.Linear(512, num_labels)
         self.crf = CRF(num_labels=num_labels)
-        self.position_embeddings = nn.Embedding(
-            max_position_embeddings, 100)  # 100为位置嵌入维度
+
+        # Freeze BERT layers
+        self._freeze_bert_layers(freeze_bert_layers)
+
+    def _freeze_bert_layers(self, num_layers_to_freeze):
+        """Freeze the first num_layers_to_freeze layers of BERT"""
+        if num_layers_to_freeze <= 0:
+            return
+
+        # Always freeze embeddings
+        for param in self.bert.embeddings.parameters():
+            param.requires_grad = False
+
+        # Freeze the first n encoder layers
+        for layer_idx in range(min(num_layers_to_freeze, len(self.bert.encoder.layer))):
+            for param in self.bert.encoder.layer[layer_idx].parameters():
+                param.requires_grad = False
 
     def forward(self, input_ids, attention_mask, labels=None):
-        outputs = self.bert(input_ids, attention_mask=attention_mask)
-        seq_length = input_ids.size(1)
-        batch_size = input_ids.size(0)
-        # 生成位置索引
-        position_ids = torch.arange(
-            seq_length, dtype=torch.long, device=input_ids.device)
-        position_ids = position_ids.unsqueeze(0).expand(batch_size, seq_length)
-        pos_embeds = self.position_embeddings(
-            position_ids)  # [batch, seq_len, 100]
-        # 拼接BERT输出和位置嵌入
+        outputs = self.bert(input_ids=input_ids,
+                            attention_mask=attention_mask)
         bert_output = outputs.last_hidden_state  # [batch, seq_len, 768]
-        # [batch, seq_len, 868]
-        concat_output = torch.cat([bert_output, pos_embeds], dim=-1)
-        lstm_output, _ = self.lstm(concat_output)
-        lstm_output = self.dropout(lstm_output)
-        logits = self.classifier(lstm_output)
+
+        # Pass BERT output directly to LSTM
+        lstm_output, _ = self.lstm(bert_output)
+
+        # Apply dropout and classification
+        attended_output = self.dropout(lstm_output)
+        logits = self.classifier(attended_output)
 
         if labels is not None:
             # During training, calculate the loss

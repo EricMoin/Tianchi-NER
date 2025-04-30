@@ -31,8 +31,12 @@ class Trainer:
 
     def train(self):
         self.model.train()
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=self.config.learning_rate, weight_decay=self.config.weight_decay)
+        optimizer = torch.optim.AdamW([
+            {'params': self.model.bert.embeddings.parameters(), 'lr': 1e-4},
+            {'params': self.model.lstm.parameters(), 'lr': 5e-4},
+            {'params': self.model.classifier.parameters(), 'lr': 5e-4},
+            {'params': self.model.crf.parameters(), 'lr': 1e-3}
+        ])
 
         total_steps = len(self.train_dataloader) * self.config.num_epochs
         self.scheduler = torch.optim.lr_scheduler.LinearLR(

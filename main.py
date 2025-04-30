@@ -51,7 +51,9 @@ def main():
         learning_rate=2e-5,
         weight_decay=0.01,
         device='cuda',
-        work_dir='result'
+        work_dir='result',
+        freeze_bert_layers=0,
+        num_prefix_tokens=20
     )
     train_reader = ConllReader(config.train_file)
     dev_reader = ConllReader(config.dev_file)
@@ -66,7 +68,7 @@ def main():
     print("labels:", label_list)
 
     model = AddressNER(pretrained_model_name=config.model_name,
-                       num_labels=len(label_list))
+                       num_labels=len(label_list), freeze_bert_layers=config.freeze_bert_layers, num_prefix_tokens=config.num_prefix_tokens)
 
     train_dataset = NERDataset(train_conll, model.tokenizer)
     dev_dataset = NERDataset(dev_conll, model.tokenizer)
