@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from conll_reader import ConllReader
-from dataset import NERDataset
+from dataset import NERDataset, NERTestDataset
 from model import FGM, PGD  # Import FGM class
 
 
@@ -18,13 +18,12 @@ class Trainer:
     device: torch.device
     id2label: dict
 
-    def __init__(self, config: Config, model: nn.Module, train_dataloader: DataLoader, val_dataloader: DataLoader, device: str, id2label: dict):
+    def __init__(self, config: Config, model: nn.Module, train_dataloader: DataLoader, val_dataloader: DataLoader, device: str):
         self.config = config
         self.model = model
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.device = torch.device(device)
-        self.id2label = id2label
 
         self.model.to(self.device)
         print(f"Training on {self.device}")
@@ -137,12 +136,34 @@ class Trainer:
         # Load the best model for inference
         self.model.load_state_dict(torch.load(
             f"{self.config.work_dir}/best_model.pt"))
-        test_reader = ConllReader(self.config.test_file)
+
+        # Convert test data to CoNLL format with O labels
+        temp_conll_file = f"{self.config.work_dir}/temp_test.conll"
+
+        # Create temporary CoNLL file from test data
+        with open(self.config.test_file, 'r', encoding='utf-8') as f_in, \
+                open(temp_conll_file, 'w', encoding='utf-8') as f_out:
+            for line in f_in:
+                line = line.strip()
+                if line:
+                    # Remove the line number prefix (e.g., "1朝阳区..." -> "朝阳区...")
+                    text = line.split('\u0001')[1]
+                    # Write each character with O label in CoNLL format (no space)
+                    for char in text:
+                        if char == '\u0001':
+                            print("HERE")
+                        f_out.write(f"{char} O\n")
+                    f_out.write("\n")  # Empty line between examples
+
+        # Use standard ConllReader to read the temporary file
+        test_reader = ConllReader(temp_conll_file)
         test_conll = list(test_reader.read())
-        test_data = NERDataset(
-            test_conll, self.model.tokenizer)
+
+        # Create dataset using the ConllReader output
+        test_dataset = NERDataset(
+            test_conll, self.model.tokenizer, self.config.label2id)
         test_dataloader = DataLoader(
-            test_data, batch_size=self.config.batch_size)
+            test_dataset, batch_size=self.config.batch_size)
 
         self.model.eval()
         all_preds = []
@@ -155,10 +176,11 @@ class Trainer:
                 # Get predictions
                 predictions = self.model(input_ids, attention_mask)
 
-                # Convert predictions to labels and save
+                # Process predictions for each example
                 for pred, mask in zip(predictions, attention_mask):
                     length = mask.sum().item()
-                    pred_labels = [self.id2label[p] for p in pred[:length]]
+                    pred_labels = [self.config.id2label[p]
+                                   for p in pred[:length]]
                     all_preds.append(pred_labels)
 
         # Write predictions to file

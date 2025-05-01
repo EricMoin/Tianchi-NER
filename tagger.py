@@ -1,3 +1,6 @@
+from abc import abstractmethod
+from typing import override
+
 from spacy.lang.zh import Chinese
 
 
@@ -11,6 +14,10 @@ class Tagger:
                 tp = entity_type_distribution[text].most_common(1)[0][0]
                 self.gazetteer[text] = tp
 
+    @abstractmethod
+    def predict(self, sentence: str) -> list:
+        pass
+
 
 class RuleBasedTagger(Tagger):
     def __init__(self, gazetteer: dict = {}, threshold: int = 1, entity_type_distribution: dict = {}):
@@ -23,6 +30,7 @@ class RuleBasedTagger(Tagger):
             ruler.add_patterns(patterns)
         self.nlp = nlp
 
+    @override
     def predict(self, sentence: str) -> list:
         doc = self.nlp(sentence)
         entities = []

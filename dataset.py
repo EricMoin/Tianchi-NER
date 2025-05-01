@@ -14,17 +14,20 @@ class NERDataEntity:
         self.attention_mask = attention_mask
         self.labels = labels
 
+    def to_map(self):
+        return {
+            "input_ids": self.input_ids,
+            "attention_mask": self.attention_mask,
+            "labels": self.labels
+        }
+
 
 class NERDataset(Dataset):
-    def __init__(self, data: list[ConllEntity], tokenizer: AutoTokenizer):
+    def __init__(self, data: list[ConllEntity], tokenizer: AutoTokenizer, label_map: dict[str, int]):
         super().__init__()
         self.data = data
         self.tokenizer = tokenizer
-        unique_labels = set()
-        for example in data:
-            unique_labels.update(example.labels)
-        self.label_map = {label: i for i, label in enumerate(
-            sorted(unique_labels))}
+        self.label_map = label_map
 
     def __getitem__(self, index: int) -> dict:
         # Initialize empty lists
@@ -65,11 +68,55 @@ class NERDataset(Dataset):
         padded_labels = label_ids + \
             [self.label_map["O"]] * (150 - len(label_ids))
 
-        return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "labels": torch.tensor(padded_labels)
-        }
+        return NERDataEntity(
+            input_ids=encoding["input_ids"].squeeze(0),
+            attention_mask=encoding["attention_mask"].squeeze(0),
+            labels=torch.tensor(padded_labels)
+        ).to_map()
 
     def __len__(self):
         return len(self.data)
+
+
+class NERTestDataset(Dataset):
+    def __init__(self, test_file: str, tokenizer: AutoTokenizer, label_map: dict[str, int]):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.examples = []
+
+        with open(test_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                # Remove line number prefix and strip whitespace
+                # Format: "1朝阳区小关北里000-0号" -> "朝阳区小关北里000-0号"
+                text = line.strip()
+                if text:
+                    # Remove the line number at the beginning
+                    text_without_number = ''.join(c for i, c in enumerate(
+                        text) if not (i == 0 and c.isdigit()))
+                self.examples.append(text_without_number)
+
+    def __getitem__(self, index: int) -> dict:
+        text = self.examples[index]
+
+        # Convert text to character-level tokens for Chinese
+        tokens = list(text)
+
+        # Tokenize the characters
+        encoding = self.tokenizer(
+            tokens,
+            truncation=True,
+            padding="max_length",
+            max_length=150,
+            is_split_into_words=True,
+            return_tensors="pt",
+        )
+
+        return {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "text": text,  # Include original text for reference
+            "tokens": tokens  # Include original tokens for mapping predictions back
+        }
+
+    def __len__(self):
+        return len(self.examples)

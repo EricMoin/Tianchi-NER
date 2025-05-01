@@ -5,6 +5,8 @@ from model import AddressNER
 from config import Config
 from torch.utils.data import DataLoader
 
+from prompt_writer import PromptWriter
+from tagger import RuleBasedTagger, Tagger
 from trainer import Trainer
 
 
@@ -40,10 +42,36 @@ def get_result():
 
 
 def main():
+    label_list = [
+        'B-prov', 'I-prov', 'E-prov', 'S-prov',
+        'B-city', 'I-city', 'E-city', 'S-city',
+        'B-district', 'I-district', 'E-district', 'S-district',
+        'B-devzone', 'I-devzone', 'E-devzone', 'S-devzone',
+        'B-town', 'I-town', 'E-town', 'S-town',
+        'B-community', 'I-community', 'E-community', 'S-community',
+        'B-village_group', 'I-village_group', 'E-village_group', 'S-village_group',
+        'B-road', 'I-road', 'E-road', 'S-road',
+        'B-roadno', 'I-roadno', 'E-roadno', 'S-roadno',
+        'B-poi', 'I-poi', 'E-poi', 'S-poi',
+        'B-subpoi', 'I-subpoi', 'E-subpoi', 'S-subpoi',
+        'B-houseno', 'I-houseno', 'E-houseno', 'S-houseno',
+        'B-cellno', 'I-cellno', 'E-cellno', 'S-cellno',
+        'B-floorno', 'I-floorno', 'E-floorno', 'S-floorno',
+        'B-roomno', 'I-roomno', 'E-roomno', 'S-roomno',
+        'B-detail', 'I-detail', 'E-detail', 'S-detail',
+        'B-assist', 'I-assist', 'E-assist', 'S-assist',
+        'B-distance', 'I-distance', 'E-distance', 'S-distance',
+        'B-intersection', 'I-intersection', 'E-intersection', 'S-intersection',
+        'B-redundant', 'I-redundant', 'E-redundant', 'S-redundant',
+        'B-others', 'I-others', 'E-others', 'S-others',
+        'O'
+    ]
+    id2label = {i: label for i, label in enumerate(label_list)}
+    label2id = {label: i for i, label in enumerate(label_list)}
     config = Config(
-        train_file='data/train.with_prompt.conll',
-        dev_file='data/dev.with_prompt.conll',
-        test_file='data/test.with_prompt.conll',
+        train_file='data/train.conll',
+        dev_file='data/dev.conll',
+        test_file='data/final_test.conll',
         output_file='result/prediction.conll',
         model_name='bert-base-chinese',
         batch_size=16,
@@ -53,25 +81,24 @@ def main():
         device='cuda',
         work_dir='result',
         freeze_bert_layers=0,
-        num_prefix_tokens=20
+        num_prefix_tokens=20,
+        label2id=label2id,
+        id2label=id2label
     )
     train_reader = ConllReader(config.train_file)
     dev_reader = ConllReader(config.dev_file)
 
     train_conll = list(train_reader.read())
     dev_conll = list(dev_reader.read())
-    label_list = []
-    for example in train_conll+dev_conll:
-        label_list.extend(example.labels)
-    label_list = sorted(list(set(label_list)))
-    id2label = {i: label for i, label in enumerate(label_list)}
-    print("labels:", label_list)
+
+    print("len(label_list):", len(label_list))
+    print("label_list:", label_list)
 
     model = AddressNER(pretrained_model_name=config.model_name,
-                       num_labels=len(label_list), freeze_bert_layers=config.freeze_bert_layers, num_prefix_tokens=config.num_prefix_tokens)
+                       num_labels=len(label_list), freeze_bert_layers=config.freeze_bert_layers)
 
-    train_dataset = NERDataset(train_conll, model.tokenizer)
-    dev_dataset = NERDataset(dev_conll, model.tokenizer)
+    train_dataset = NERDataset(train_conll, model.tokenizer, label2id)
+    dev_dataset = NERDataset(dev_conll, model.tokenizer, label2id)
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size,
                               shuffle=True)
@@ -84,15 +111,20 @@ def main():
         train_dataloader=train_loader,
         val_dataloader=dev_loader,
         device=config.device,
-        id2label=id2label
     )
 
-    trainer.train()
+    # trainer.train()
 
-    # trainer.test()
+    trainer.test()
 
-    # get_result()
+    get_result()
 
 
 if __name__ == "__main__":
     main()
+    # tagger = RuleBasedTagger()
+    # prompt_writer = PromptWriter(
+    #     conll_file='result/test_with_prompt.conll',
+    #     tagger=tagger,
+    # )
+    # prompt_writer.write_test('data/final_test.txt')

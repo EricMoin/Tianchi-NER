@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 
 class AddressNER(nn.Module):
-    def __init__(self, pretrained_model_name, num_labels, freeze_bert_layers=8, num_prefix_tokens=20):
+    def __init__(self, pretrained_model_name, num_labels, freeze_bert_layers=8):
         super(AddressNER, self).__init__()
         self.bert = AutoModel.from_pretrained(pretrained_model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
