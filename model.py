@@ -88,7 +88,7 @@ class FGM:
 
 
 class PGD:
-    def __init__(self, model, epsilon=1.0, alpha=0.3, steps=3):
+    def __init__(self, model, epsilon=0.8, alpha=0.3, steps=3):
         self.model = model
         self.epsilon = epsilon  # Maximum perturbation
         self.alpha = alpha      # Step size

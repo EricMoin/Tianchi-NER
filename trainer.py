@@ -89,7 +89,34 @@ class Trainer:
             avg_train_loss = train_loss / len(self.train_dataloader)
             print(f"Average training loss: {avg_train_loss:.4f}")
 
-            # Evaluation
+            # Evaluate on training set
+            self.model.eval()
+            train_preds = []
+            train_labels_list = []
+
+            with torch.no_grad():
+                for batch in tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.config.num_epochs} [Train Eval]"):
+                    input_ids = batch["input_ids"].to(self.device)
+                    attention_mask = batch["attention_mask"].to(self.device)
+                    labels = batch["labels"].to(self.device)
+
+                    # Get predictions
+                    predictions = self.model(input_ids, attention_mask)
+
+                    # Convert predictions and labels to lists
+                    for pred, mask, label in zip(predictions, attention_mask, labels):
+                        length = mask.sum().item()
+                        train_preds.extend(pred[:length])
+                        train_labels_list.extend(label[:length].cpu().numpy())
+
+            # Calculate training metrics
+            train_correct = sum(p == l for p, l in zip(
+                train_preds, train_labels_list))
+            train_total = len(train_preds)
+            train_accuracy = train_correct / train_total
+            print(f"Training Accuracy: {train_accuracy:.4f}")
+
+            # Evaluation on validation set
             self.model.eval()
             all_preds = []
             all_labels = []
@@ -109,11 +136,12 @@ class Trainer:
                         all_preds.extend(pred[:length])
                         all_labels.extend(label[:length].cpu().numpy())
 
-            # Calculate metrics (simple accuracy for now)
+            # Calculate validation metrics
             correct = sum(p == l for p, l in zip(all_preds, all_labels))
             total = len(all_preds)
             accuracy = correct / total
             print(f"Validation Accuracy: {accuracy:.4f}")
+
             # Save model if it's the best so far
             if accuracy > best_f1:
                 best_f1 = accuracy
