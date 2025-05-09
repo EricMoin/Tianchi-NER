@@ -15,6 +15,7 @@ class Config:
     num_prefix_tokens: int
     label2id: dict[str, int]
     id2label: dict[int, str]
+    adversarial_training_start_epoch: int
 
     def __init__(self,
                  train_file: str,
@@ -31,7 +32,8 @@ class Config:
                  device: str,
                  work_dir: str,
                  freeze_bert_layers: int,
-                 num_prefix_tokens: int
+                 num_prefix_tokens: int,
+                 adversarial_training_start_epoch: int = 0,
                  ):
         self.train_file = train_file
         self.dev_file = dev_file
@@ -48,3 +50,4 @@ class Config:
         self.num_prefix_tokens = num_prefix_tokens
         self.label2id = label2id
         self.id2label = id2label
+        self.adversarial_training_start_epoch = adversarial_training_start_epoch

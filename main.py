@@ -1,10 +1,10 @@
 import os
-import argparse
 from conll_reader import ConllReader
 from dataset import NERDataset
 from model import AddressNER
 from config import Config
 from torch.utils.data import DataLoader
+
 from trainer import Trainer
 
 
@@ -81,7 +81,8 @@ def main():
         freeze_bert_layers=0,
         num_prefix_tokens=20,
         label2id=label2id,
-        id2label=id2label
+        id2label=id2label,
+        adversarial_training_start_epoch=5,
     )
     train_reader = ConllReader(config.train_file)
     dev_reader = ConllReader(config.dev_file)
@@ -99,19 +100,9 @@ def main():
     dev_dataset = NERDataset(dev_conll, model.tokenizer, label2id)
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size,
-                              shuffle=True, num_workers=4, pin_memory=True)
+                              shuffle=True)
     dev_loader = DataLoader(dev_dataset, batch_size=config.batch_size,
-                            shuffle=False, num_workers=4, pin_memory=True)
-
-    # 从命令行参数获取
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--local_rank", type=int, default=-1)
-    args = parser.parse_args()
-
-    # 尝试从参数获取，如果没有则从环境变量获取
-    local_rank = args.local_rank
-    if local_rank == -1:
-        local_rank = int(os.environ.get("LOCAL_RANK", -1))
+                            shuffle=False)
 
     trainer = Trainer(
         config=config,
@@ -119,14 +110,13 @@ def main():
         train_dataloader=train_loader,
         val_dataloader=dev_loader,
         device=config.device,
-        local_rank=local_rank
     )
 
     trainer.train()
 
-    # trainer.test()
+    trainer.test()
 
-    # get_result()
+    get_result()
 
 
 if __name__ == "__main__":

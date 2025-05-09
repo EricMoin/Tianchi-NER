@@ -2,15 +2,13 @@ import os
 import torch
 from config import Config
 from torch import nn
-import torch.distributed as dist  # 正确导入分布式模块
-from torch.utils.data import DataLoader, DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-from torch.amp import autocast, GradScaler  # 添加自动混合精度和梯度缩放
+from transformers import get_cosine_schedule_with_warmup
 
 from conll_reader import ConllReader
 from dataset import NERDataset, NERTestDataset
-from model import FGM, PGD  # Import FGM class
+from model import PGD
 
 
 class Trainer:
@@ -20,88 +18,57 @@ class Trainer:
     val_dataloader: DataLoader
     device: torch.device
     id2label: dict
-    local_rank: int
-    is_main_process: bool
 
-    def __init__(self, config: Config, model: nn.Module, train_dataloader: DataLoader, val_dataloader: DataLoader, device: str, local_rank=-1):
+    def __init__(self, config: Config, model: nn.Module, train_dataloader: DataLoader, val_dataloader: DataLoader, device: str):
         self.config = config
-        self.local_rank = local_rank
+        self.model = model
+        self.train_dataloader = train_dataloader
+        self.val_dataloader = val_dataloader
+        self.device = torch.device(device)
 
-        if local_rank != -1:
-            # Initialize process group
-            dist.init_process_group(backend='nccl')
-            torch.cuda.set_device(local_rank)
-            self.device = torch.device(f'cuda:{local_rank}')
-            self.model = model.to(self.device)
-            self.model = DDP(self.model,
-                             device_ids=[local_rank],
-                             output_device=local_rank,
-                             find_unused_parameters=True)
-            self.is_main_process = (local_rank == 0)
-        else:
-            self.device = torch.device(device)
-            self.model = model.to(self.device)
-            self.is_main_process = True
-
-        # Re-create dataloaders with distributed samplers
-        if hasattr(train_dataloader.dataset, 'dataset'):
-            train_sampler = DistributedSampler(
-                train_dataloader.dataset) if local_rank != -1 else None
-            val_sampler = DistributedSampler(
-                val_dataloader.dataset, shuffle=False) if local_rank != -1 else None
-
-            self.train_dataloader = DataLoader(
-                train_dataloader.dataset,
-                batch_size=config.batch_size,
-                sampler=train_sampler,
-                num_workers=train_dataloader.num_workers
-            )
-
-            self.val_dataloader = DataLoader(
-                val_dataloader.dataset,
-                batch_size=config.batch_size,
-                sampler=val_sampler,
-                num_workers=val_dataloader.num_workers
-            )
-        else:
-            self.train_dataloader = train_dataloader
-            self.val_dataloader = val_dataloader
+        self.model.to(self.device)
+        print(f"Training on {self.device}")
 
     def train(self):
-        # Get model module if it's wrapped with DDP
-        model_module = self.model.module if hasattr(
-            self.model, 'module') else self.model
+        self.model.train()
+        # optimizer = torch.optim.AdamW([
+        #     {'params': self.model.bert.embeddings.parameters(), 'lr': 2e-5},
+        #     {'params': self.model.lstm.parameters(), 'lr': 5e-4},
+        #     {'params': self.model.classifier.parameters(), 'lr': 5e-4},
+        #     {'params': self.model.crf.parameters(), 'lr': 1e-3}
+        # ])
+
+        # total_training_steps = len(
+        #     self.train_dataloader) * self.config.num_epochs
+        # warmup_steps = int(total_training_steps * 0.1)
+        # # Use cosine scheduler with warmup
+        # self.scheduler = get_cosine_schedule_with_warmup(
+        #     optimizer,
+        #     num_warmup_steps=warmup_steps,
+        #     num_training_steps=total_training_steps
+        # )
 
         optimizer = torch.optim.AdamW([
-            {'params': model_module.bert.embeddings.parameters(), 'lr': 1e-4},
-            {'params': model_module.lstm.parameters(), 'lr': 5e-4},
-            {'params': model_module.classifier.parameters(), 'lr': 5e-4},
-            {'params': model_module.crf.parameters(), 'lr': 1e-3}
+            {'params': self.model.bert.embeddings.parameters(), 'lr': 1e-4},
+            {'params': self.model.lstm.parameters(), 'lr': 5e-4},
+            {'params': self.model.classifier.parameters(), 'lr': 5e-4},
+            {'params': self.model.crf.parameters(), 'lr': 1e-3}
         ])
 
         total_steps = len(self.train_dataloader) * self.config.num_epochs
         self.scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=1.0, end_factor=0, total_iters=total_steps)
+
         best_f1 = 0
 
-        # 初始化梯度缩放器
-        scaler = GradScaler()
-
-        # Initialize adversarial training
-        pgd = PGD(model_module)
+        pgd = PGD(self.model)
 
         for epoch in range(self.config.num_epochs):
-            # Set epoch for sampler
-            if hasattr(self.train_dataloader, 'sampler') and hasattr(self.train_dataloader.sampler, 'set_epoch'):
-                self.train_dataloader.sampler.set_epoch(epoch)
-
             # Training
             self.model.train()
             train_loss = 0
             train_pbar = tqdm(
-                self.train_dataloader, desc=f"Epoch {epoch+1}/{self.config.num_epochs} [Train]",
-                disable=not self.is_main_process
-            )
+                self.train_dataloader, desc=f"Epoch {epoch+1}/{self.config.num_epochs} [Train]")
 
             for batch in train_pbar:
                 # Move batch to device
@@ -109,74 +76,39 @@ class Trainer:
                 attention_mask = batch["attention_mask"].to(self.device)
                 labels = batch["labels"].to(self.device)
 
-                # 1. 正常前向和反向传播
+                # Forward pass
                 optimizer.zero_grad()
-                with autocast(device_type=self.device.type):
-                    loss = self.model(input_ids, attention_mask, labels)
-                scaler.scale(loss).backward()
+                loss = self.model(input_ids, attention_mask, labels)
 
-                # 2. PGD对抗训练
-                pgd.attack(is_first_attack=True)  # 初始扰动
+                # Backward pass
+                loss.backward()
 
-                for _ in range(pgd.steps - 1):
-                    optimizer.zero_grad()
-                    with autocast(device_type=self.device.type):
+                # Curriculum Learning: Apply PGD only after a certain number of epochs
+                if epoch >= self.config.adversarial_training_start_epoch:
+                    pgd.attack(is_first_attack=True)  # 初始扰动
+
+                    for _ in range(pgd.steps - 1):
+                        optimizer.zero_grad()
                         loss_adv = self.model(
                             input_ids, attention_mask, labels)
-                    scaler.scale(loss_adv).backward()
-                    pgd.attack()
+                        loss_adv.backward()  # 反向传播，计算梯度
+                        pgd.attack()  # 多步更新扰动
 
-                with autocast(device_type=self.device.type):
                     loss_adv = self.model(input_ids, attention_mask, labels)
-                scaler.scale(loss_adv).backward()
+                    loss_adv.backward()  # 计算最终的对抗梯度
 
-                pgd.restore()  # 恢复embedding参数
+                    pgd.restore()  # 恢复embedding参数
 
-                # 3. 一次性更新所有参数
-                scaler.step(optimizer)
-                scaler.update()
+                optimizer.step()
+                self.scheduler.step()
 
                 train_loss += loss.item()
                 train_pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-            self.scheduler.step()  # 确保在optimizer.step()之后调用
-            # Average loss across processes
-            if self.local_rank != -1:
-                torch.distributed.all_reduce(
-                    torch.tensor(train_loss).to(self.device))
-                train_loss = train_loss / dist.get_world_size()
 
             avg_train_loss = train_loss / len(self.train_dataloader)
-            if self.is_main_process:
-                print(f"Average training loss: {avg_train_loss:.4f}")
+            print(f"Average training loss: {avg_train_loss:.4f}")
 
-            # Evaluate on training set
-            self.model.eval()
-            train_preds = []
-            train_labels_list = []
-
-            with torch.no_grad():
-                for batch in tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.config.num_epochs} [Train Eval]"):
-                    input_ids = batch["input_ids"].to(self.device)
-                    attention_mask = batch["attention_mask"].to(self.device)
-                    labels = batch["labels"].to(self.device)
-
-                    # Get predictions
-                    predictions = self.model(input_ids, attention_mask)
-
-                    # Convert predictions and labels to lists
-                    for pred, mask, label in zip(predictions, attention_mask, labels):
-                        length = mask.sum().item()
-                        train_preds.extend(pred[:length])
-                        train_labels_list.extend(label[:length].cpu().numpy())
-
-            # Calculate training metrics
-            train_correct = sum(p == l for p, l in zip(
-                train_preds, train_labels_list))
-            train_total = len(train_preds)
-            train_accuracy = train_correct / train_total
-            print(f"Training Accuracy: {train_accuracy:.4f}")
-
-            # Evaluation on validation set
+            # Evaluation
             self.model.eval()
             all_preds = []
             all_labels = []
@@ -196,35 +128,28 @@ class Trainer:
                         all_preds.extend(pred[:length])
                         all_labels.extend(label[:length].cpu().numpy())
 
-            # Calculate validation metrics
+            # Calculate metrics (simple accuracy for now)
             correct = sum(p == l for p, l in zip(all_preds, all_labels))
             total = len(all_preds)
             accuracy = correct / total
             print(f"Validation Accuracy: {accuracy:.4f}")
+            # Save model if it's the best so far
+            if accuracy > best_f1:
+                best_f1 = accuracy
+                saved_path = os.path.join(
+                    self.config.work_dir, f"best_model.pt")
+                os.makedirs(self.config.work_dir, exist_ok=True)
+                torch.save(self.model.state_dict(), saved_path)
+                print(f"Saved new best model with accuracy: {accuracy:.4f}")
 
-            # Save model only from main process
-            if self.is_main_process:
-                if accuracy > best_f1:
-                    best_f1 = accuracy
-                    saved_path = os.path.join(
-                        self.config.work_dir, f"best_model.pt")
-                    os.makedirs(self.config.work_dir, exist_ok=True)
-                    torch.save(model_module.state_dict(), saved_path)
-                    print(
-                        f"Saved new best model with accuracy: {accuracy:.4f}")
-
-                # Save the last model
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model_module.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
-                    'loss': avg_train_loss,
-                }, f"{self.config.work_dir}/checkpoint_epoch_{epoch+1}.pt")
-
-        # Cleanup distributed processes
-        if self.local_rank != -1:
-            dist.destroy_process_group()
+            # Save the last model
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': self.scheduler.state_dict(),
+                'loss': avg_train_loss,
+            }, f"{self.config.work_dir}/checkpoint_epoch_{epoch+1}.pt")
 
     def test(self):
         # Load the best model for inference

@@ -54,7 +54,9 @@ class AddressNER(nn.Module):
 
         if labels is not None:
             # During training, calculate the loss
-            loss = -self.crf(logits, labels, mask=attention_mask.bool())
+            # loss = -self.crf(logits, labels, mask=attention_mask.bool())
+            crf_loss = CRFAwareLoss(self.crf)
+            loss = crf_loss(logits, labels, attention_mask.bool())
             return loss.mean()
         else:
             # During inference, decode the best path
@@ -64,31 +66,8 @@ class AddressNER(nn.Module):
         return len(self.data)
 
 
-class FGM:
-    def __init__(self, model, epsilon=1.0):
-        self.model = model
-        self.epsilon = epsilon
-        self.backup = {}
-
-    def attack(self, emb_name='bert.embeddings.word_embeddings.weight'):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and emb_name in name:
-                self.backup[name] = param.data.clone()
-                norm = torch.norm(param.grad)
-                if norm != 0:
-                    r_at = self.epsilon * param.grad / norm
-                    param.data.add_(r_at)
-
-    def restore(self, emb_name='bert.embeddings.word_embeddings.weight'):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and emb_name in name:
-                assert name in self.backup
-                param.data = self.backup[name]
-        self.backup = {}
-
-
 class PGD:
-    def __init__(self, model, epsilon=0.68, alpha=0.3, steps=3):
+    def __init__(self, model, epsilon=0.68, alpha=0.3, steps=2):
         self.model = model
         self.epsilon = epsilon  # Maximum perturbation
         self.alpha = alpha      # Step size
@@ -133,3 +112,34 @@ class PGD:
                 assert name in self.emb_backup
                 param.data = self.emb_backup[name]
         self.emb_backup = {}
+
+
+class CRFAwareLoss(nn.Module):
+    def __init__(self, crf: CRF, transition_penalty=0.175):
+        super().__init__()
+        self.crf = crf
+        self.transition_probs = F.softmax(
+            self.crf.trans_matrix, dim=1).detach()
+        self.transition_penalty = transition_penalty
+        # 获取 CRF 的转移矩阵（形状: [num_tags, num_tags]）
+        self.transition_matrix = crf.trans_matrix.detach()
+
+    def forward(self, emissions, tags, mask):
+        # 常规 CRF 负对数似然损失
+        crf_loss = -self.crf(emissions, tags, mask=mask)
+
+        # 计算标签转移的不合理性惩罚
+        batch_size, seq_len = tags.shape
+        penalty = 0.0
+        for i in range(seq_len - 1):
+            current_tags = tags[:, i]
+            next_tags = tags[:, i + 1]
+            # 对每对连续标签计算转移概率的负值（越小越合理）
+            invalid_transitions = - \
+                torch.log(
+                    self.transition_probs[current_tags, next_tags] + 1e-8)
+            penalty += invalid_transitions.mean()
+
+        # 总损失 = CRF 损失 + 惩罚项
+        total_loss = crf_loss + self.transition_penalty * penalty
+        return total_loss
