@@ -40,36 +40,29 @@ def get_result():
 
 
 def main():
-    label_list = [
-        'B-prov', 'I-prov', 'E-prov', 'S-prov',
-        'B-city', 'I-city', 'E-city', 'S-city',
-        'B-district', 'I-district', 'E-district', 'S-district',
-        'B-devzone', 'I-devzone', 'E-devzone', 'S-devzone',
-        'B-town', 'I-town', 'E-town', 'S-town',
-        'B-community', 'I-community', 'E-community', 'S-community',
-        'B-village_group', 'I-village_group', 'E-village_group', 'S-village_group',
-        'B-road', 'I-road', 'E-road', 'S-road',
-        'B-roadno', 'I-roadno', 'E-roadno', 'S-roadno',
-        'B-poi', 'I-poi', 'E-poi', 'S-poi',
-        'B-subpoi', 'I-subpoi', 'E-subpoi', 'S-subpoi',
-        'B-houseno', 'I-houseno', 'E-houseno', 'S-houseno',
-        'B-cellno', 'I-cellno', 'E-cellno', 'S-cellno',
-        'B-floorno', 'I-floorno', 'E-floorno', 'S-floorno',
-        'B-roomno', 'I-roomno', 'E-roomno', 'S-roomno',
-        'B-detail', 'I-detail', 'E-detail', 'S-detail',
-        'B-assist', 'I-assist', 'E-assist', 'S-assist',
-        'B-distance', 'I-distance', 'E-distance', 'S-distance',
-        'B-intersection', 'I-intersection', 'E-intersection', 'S-intersection',
-        'B-redundant', 'I-redundant', 'E-redundant', 'S-redundant',
-        'B-others', 'I-others', 'E-others', 'S-others',
-        'O'
+    labels = [
+        'prov', 'city', 'district', 'devzone',
+        'town', 'community', 'village_group',
+        'road', 'roadno', 'poi', 'subpoi',
+        'houseno', 'cellno', 'floorno', 'roomno',
+        'detail', 'assist', 'distance',
+        'intersection', 'redundant',
+        'person', 'others',
     ]
+    label_list = []
+    for label in labels:
+        label_list.append(f'B-{label}')
+        label_list.append(f'I-{label}')
+        label_list.append(f'E-{label}')
+        label_list.append(f'S-{label}')
+    label_list.append('O')
     id2label = {i: label for i, label in enumerate(label_list)}
     label2id = {label: i for i, label in enumerate(label_list)}
+
     config = Config(
         train_file='data/train.conll',
         dev_file='data/dev.conll',
-        test_file='data/final_test.conll',
+        test_file='data/final_test.txt',
         output_file='result/prediction.conll',
         model_name='bert-base-chinese',
         batch_size=16,
@@ -82,7 +75,12 @@ def main():
         num_prefix_tokens=20,
         label2id=label2id,
         id2label=id2label,
-        adversarial_training_start_epoch=5,
+        adversarial_training_start_epoch=3,
+        focal_loss_alpha=0.25,
+        focal_loss_gamma=1.5,
+        hybrid_loss_weight_crf=0.5,
+        hybrid_loss_weight_focal=0.5,
+        crf_transition_penalty=0.175,
     )
     train_reader = ConllReader(config.train_file)
     dev_reader = ConllReader(config.dev_file)
@@ -94,7 +92,14 @@ def main():
     print("label_list:", label_list)
 
     model = AddressNER(pretrained_model_name=config.model_name,
-                       num_labels=len(label_list), freeze_bert_layers=config.freeze_bert_layers)
+                       num_labels=len(label_list),
+                       freeze_bert_layers=config.freeze_bert_layers,
+                       focal_alpha=config.focal_loss_alpha,
+                       focal_gamma=config.focal_loss_gamma,
+                       weight_crf=config.hybrid_loss_weight_crf,
+                       weight_focal=config.hybrid_loss_weight_focal,
+                       crf_transition_penalty=config.crf_transition_penalty
+                       )
 
     train_dataset = NERDataset(train_conll, model.tokenizer, label2id)
     dev_dataset = NERDataset(dev_conll, model.tokenizer, label2id)
@@ -112,7 +117,7 @@ def main():
         device=config.device,
     )
 
-    trainer.train()
+    # trainer.train()
 
     trainer.test()
 

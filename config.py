@@ -16,6 +16,11 @@ class Config:
     label2id: dict[str, int]
     id2label: dict[int, str]
     adversarial_training_start_epoch: int
+    focal_loss_alpha: float
+    focal_loss_gamma: float
+    hybrid_loss_weight_crf: float
+    hybrid_loss_weight_focal: float
+    crf_transition_penalty: float
 
     def __init__(self,
                  train_file: str,
@@ -33,7 +38,12 @@ class Config:
                  work_dir: str,
                  freeze_bert_layers: int,
                  num_prefix_tokens: int,
-                 adversarial_training_start_epoch: int = 0,
+                 adversarial_training_start_epoch: int,
+                 focal_loss_alpha: float,
+                 focal_loss_gamma: float,
+                 hybrid_loss_weight_crf: float,
+                 hybrid_loss_weight_focal: float,
+                 crf_transition_penalty: float,
                  ):
         self.train_file = train_file
         self.dev_file = dev_file
@@ -51,3 +61,8 @@ class Config:
         self.label2id = label2id
         self.id2label = id2label
         self.adversarial_training_start_epoch = adversarial_training_start_epoch
+        self.focal_loss_alpha = focal_loss_alpha
+        self.focal_loss_gamma = focal_loss_gamma
+        self.hybrid_loss_weight_crf = hybrid_loss_weight_crf
+        self.hybrid_loss_weight_focal = hybrid_loss_weight_focal
+        self.crf_transition_penalty = crf_transition_penalty
