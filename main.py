@@ -69,9 +69,9 @@ def main():
     config = Config(
         train_file='data/train.conll',
         dev_file='data/dev.conll',
-        test_file='data/final_test.conll',
+        test_file='data/final_test.txt',
         output_file='result/prediction.conll',
-        model_name='bert-base-chinese',
+        model_name='pretrained/address_adapted_model',
         batch_size=16,
         num_epochs=15,
         learning_rate=2e-5,
@@ -88,7 +88,7 @@ def main():
         use_swa=True,
         swa_start_epoch=0,
         swa_lr=1e-5,
-        swa_freq=3,
+        swa_freq=2,
     )
     train_reader = ConllReader(config.train_file)
     dev_reader = ConllReader(config.dev_file)
@@ -121,7 +121,7 @@ def main():
         device=config.device,
     )
 
-    trainer.train()
+    # trainer.train()
 
     trainer.test()
 

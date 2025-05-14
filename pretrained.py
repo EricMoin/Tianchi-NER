@@ -5,8 +5,8 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from transformers import (
-    BertTokenizer,
-    BertForMaskedLM,
+    AutoTokenizer,
+    AutoModelForMaskedLM,
     get_linear_schedule_with_warmup
 )
 from tqdm import tqdm
@@ -152,8 +152,8 @@ def train(args):
         torch.cuda.manual_seed_all(args.seed)
 
     # 加载tokenizer和模型
-    tokenizer = BertTokenizer.from_pretrained(args.model_name)
-    model = BertForMaskedLM.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    model = AutoModelForMaskedLM.from_pretrained(args.model_name)
 
     # 确保输出目录存在
     if not os.path.exists(args.output_dir):
@@ -266,8 +266,8 @@ def train(args):
 
 if __name__ == "__main__":
     class Args:
-        model_name = "bert-base-chinese"
-        train_file = "data/addresses.txt"  # 地址语料文件
+        model_name = "hfl/chinese-bert-wwm"
+        train_file = "data/address.txt"  # 地址语料文件
         output_dir = "pretrained/address_adapted_model"
         max_length = 128
         batch_size = 16
@@ -275,7 +275,7 @@ if __name__ == "__main__":
         weight_decay = 0.01
         adam_epsilon = 1e-8
         max_grad_norm = 1.0
-        num_train_epochs = 3
+        num_train_epochs = 2
         warmup_steps = 0
         save_steps = 500
         mask_probability = 0.15

@@ -6,11 +6,44 @@ import torch
 import torch.nn.functional as F
 
 
+class SpatialDropout(nn.Module):
+    def __init__(self, drop_prob):
+        super(SpatialDropout, self).__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, inputs):
+        """
+        Spatial dropout: drops entire feature maps/channels rather than individual elements
+        """
+        if not self.training or self.drop_prob == 0:
+            return inputs
+
+        # inputs shape: [batch_size, seq_len, hidden_dim]
+        batch_size, seq_len, hidden_dim = inputs.shape
+
+        # Create mask that drops the same channels for all sequence positions
+        # Shape: [batch_size, 1, hidden_dim]
+        mask = torch.rand(batch_size, 1, hidden_dim,
+                          device=inputs.device) > self.drop_prob
+        mask = mask.float() / (1 - self.drop_prob)  # Scale to maintain expected value
+
+        # Broadcast mask along sequence dimension without adding a new dimension
+        # Final shape remains [batch_size, seq_len, hidden_dim]
+        return inputs * mask
+
+
 class AddressNER(nn.Module):
-    def __init__(self, pretrained_model_name, num_labels, freeze_bert_layers=8, focal_alpha=0.25, focal_gamma=2.0, weight_crf=0.5, weight_focal=0.5, crf_transition_penalty=0.175):
+    def __init__(self, pretrained_model_name, num_labels, freeze_bert_layers=8, spatial_dropout=0.2, embedding_dropout=0.1):
         super(AddressNER, self).__init__()
         self.bert = AutoModel.from_pretrained(pretrained_model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
+
+        # Add embedding dropout
+        self.embedding_dropout = nn.Dropout(embedding_dropout)
+
+        # Add spatial dropout
+        self.spatial_dropout = SpatialDropout(spatial_dropout)
+
         self.lstm = nn.LSTM(
             input_size=768,  # BERT hidden size
             hidden_size=256,
@@ -18,21 +51,8 @@ class AddressNER(nn.Module):
             bidirectional=True,
             batch_first=True
         )
-
-        self.dropout = nn.Dropout(0.1)
         self.classifier = nn.Linear(512, num_labels)
         self.crf = CRF(num_labels=num_labels)
-
-        # Initialize HybridLoss
-        self.loss_fn = HybridLoss(
-            crf_model=self.crf,
-            num_classes=num_labels,
-            focal_alpha=focal_alpha,
-            focal_gamma=focal_gamma,
-            weight_crf=weight_crf,
-            weight_focal=weight_focal,
-            crf_transition_penalty=crf_transition_penalty
-        )
 
         # Freeze BERT layers
         self._freeze_bert_layers(freeze_bert_layers)
@@ -52,24 +72,34 @@ class AddressNER(nn.Module):
                 param.requires_grad = False
 
     def forward(self, input_ids, attention_mask, labels=None):
-        outputs = self.bert(input_ids=input_ids,
-                            attention_mask=attention_mask)
+        # Apply embedding dropout directly to the input embeddings
+        if self.training:
+            # Get the embeddings
+            embeddings = self.bert.embeddings.word_embeddings(input_ids)
+            # Apply dropout to embeddings
+            embeddings = self.embedding_dropout(embeddings)
+            # Pass modified embeddings through BERT
+            outputs = self.bert(inputs_embeds=embeddings,
+                                attention_mask=attention_mask)
+        else:
+            outputs = self.bert(input_ids=input_ids,
+                                attention_mask=attention_mask)
+
         bert_output = outputs.last_hidden_state  # [batch, seq_len, 768]
+
+        # Apply spatial dropout to BERT output
+        bert_output = self.spatial_dropout(bert_output)
 
         # Pass BERT output directly to LSTM
         lstm_output, _ = self.lstm(bert_output)
 
-        # Apply dropout and classification
-        attended_output = self.dropout(lstm_output)
-        logits = self.classifier(attended_output)
+        logits = self.classifier(lstm_output)
 
         if labels is not None:
             # During training, calculate the loss
             # loss = -self.crf(logits, labels, mask=attention_mask.bool())
-            # crf_loss = CRFAwareLoss(self.crf)
-            # loss = crf_loss(logits, labels, attention_mask.bool())
-            loss = self.loss_fn(logits, labels, attention_mask.bool())
-            # Ensure we still return a scalar mean loss if HybridLoss doesn't average internally
+            crf_loss = CRFAwareLoss(self.crf)
+            loss = crf_loss(logits, labels, attention_mask.bool())
             return loss.mean()
         else:
             # During inference, decode the best path
@@ -127,65 +157,6 @@ class PGD:
         self.emb_backup = {}
 
 
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets, mask=None):
-        # inputs: [batch_size, seq_len, num_classes]
-        # targets: [batch_size, seq_len]
-        # mask: [batch_size, seq_len] (boolean)
-
-        BCE_loss = F.cross_entropy(
-            inputs.view(-1, inputs.size(-1)), targets.view(-1), reduction='none')
-
-        if mask is not None:
-            # Flatten mask and apply to loss
-            mask_flat = mask.view(-1)
-            BCE_loss = BCE_loss * mask_flat
-
-        pt = torch.exp(-BCE_loss)  # Prevents nans when BCE_loss is large
-        F_loss = self.alpha * (1-pt)**self.gamma * BCE_loss
-
-        if self.reduction == 'mean':
-            if mask is not None:
-                # Compute mean only over masked elements
-                return F_loss.sum() / mask_flat.sum()
-            return F_loss.mean()
-        elif self.reduction == 'sum':
-            return F_loss.sum()
-        else:
-            return F_loss
-
-
-class HybridLoss(nn.Module):
-    def __init__(self, crf_model: CRF, num_classes: int, focal_alpha=0.25, focal_gamma=2.0, weight_crf=0.5, weight_focal=0.5, crf_transition_penalty=0.175):
-        super().__init__()
-        self.crf_aware_loss = CRFAwareLoss(
-            crf_model, transition_penalty=crf_transition_penalty)
-        self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
-        self.weight_crf = weight_crf
-        self.weight_focal = weight_focal
-        self.num_classes = num_classes
-
-    def forward(self, emissions, tags, mask):
-        # emissions: [batch_size, seq_len, num_classes]
-        # tags: [batch_size, seq_len]
-        # mask: [batch_size, seq_len] (boolean)
-
-        loss_crf = self.crf_aware_loss(emissions, tags, mask)
-
-        # FocalLoss expects class probabilities, CRF emissions are logits.
-        # No explicit softmax needed here as FocalLoss uses F.cross_entropy which handles logits.
-        loss_focal = self.focal_loss(emissions, tags, mask)
-
-        combined_loss = self.weight_crf * loss_crf + self.weight_focal * loss_focal
-        return combined_loss
-
-
 class CRFAwareLoss(nn.Module):
     def __init__(self, crf: CRF, transition_penalty=0.175):
         super().__init__()
@@ -204,8 +175,8 @@ class CRFAwareLoss(nn.Module):
         batch_size, seq_len = tags.shape
         penalty = 0.0
         for i in range(seq_len - 1):
-            current_tags = tags[:, i].to(self.transition_matrix.device)
-            next_tags = tags[:, i + 1].to(self.transition_matrix.device)
+            current_tags = tags[:, i]
+            next_tags = tags[:, i + 1]
             # 对每对连续标签计算转移概率的负值（越小越合理）
             invalid_transitions = - \
                 torch.log(

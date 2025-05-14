@@ -5,10 +5,51 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_cosine_schedule_with_warmup
+import copy
 
 from conll_reader import ConllReader
 from dataset import NERDataset, NERTestDataset
 from model import PGD
+
+
+class StochasticWeightAveraging:
+    def __init__(self, model, swa_start_epoch, swa_lr=None, swa_freq=5):
+        """
+        Implements Stochastic Weight Averaging (SWA)
+        Args:
+            model: The model to apply SWA to
+            swa_start_epoch: The epoch to start averaging weights
+            swa_lr: The learning rate to use during SWA
+            swa_freq: How frequently (in epochs) to update the SWA model
+        """
+        self.model = model
+        self.swa_start_epoch = swa_start_epoch
+        self.swa_lr = swa_lr
+        self.swa_freq = swa_freq
+        self.swa_model = None  # Will store the averaged model
+        self.n_averaged = 0  # Counter for number of models averaged
+
+    def update(self, epoch, model):
+        """Update the SWA model by averaging with current model weights"""
+        if epoch < self.swa_start_epoch or (epoch - self.swa_start_epoch) % self.swa_freq != 0:
+            return
+
+        # Initialize SWA model with first model after start_epoch
+        if self.swa_model is None:
+            self.swa_model = copy.deepcopy(model)
+        else:
+            # Update running average of parameters
+            for swa_param, model_param in zip(self.swa_model.parameters(), model.parameters()):
+                swa_param.data.mul_(self.n_averaged / (self.n_averaged + 1))
+                swa_param.data.add_(model_param.data / (self.n_averaged + 1))
+
+        self.n_averaged += 1
+
+    def get_final_model(self):
+        """Return the SWA model with averaged weights"""
+        if self.swa_model is None:
+            return self.model  # No averaging was done
+        return self.swa_model
 
 
 class Trainer:
@@ -26,27 +67,22 @@ class Trainer:
         self.val_dataloader = val_dataloader
         self.device = torch.device(device)
 
+        # Initialize SWA if enabled
+        if self.config.use_swa:
+            self.swa = StochasticWeightAveraging(
+                model=model,
+                swa_start_epoch=self.config.swa_start_epoch,
+                swa_lr=self.config.swa_lr,
+                swa_freq=self.config.swa_freq
+            )
+        else:
+            self.swa = None
+
         self.model.to(self.device)
         print(f"Training on {self.device}")
 
     def train(self):
         self.model.train()
-        # optimizer = torch.optim.AdamW([
-        #     {'params': self.model.bert.embeddings.parameters(), 'lr': 2e-5},
-        #     {'params': self.model.lstm.parameters(), 'lr': 5e-4},
-        #     {'params': self.model.classifier.parameters(), 'lr': 5e-4},
-        #     {'params': self.model.crf.parameters(), 'lr': 1e-3}
-        # ])
-
-        # total_training_steps = len(
-        #     self.train_dataloader) * self.config.num_epochs
-        # warmup_steps = int(total_training_steps * 0.1)
-        # # Use cosine scheduler with warmup
-        # self.scheduler = get_cosine_schedule_with_warmup(
-        #     optimizer,
-        #     num_warmup_steps=warmup_steps,
-        #     num_training_steps=total_training_steps
-        # )
 
         optimizer = torch.optim.AdamW([
             {'params': self.model.bert.embeddings.parameters(), 'lr': 1e-4},
@@ -133,6 +169,11 @@ class Trainer:
             total = len(all_preds)
             accuracy = correct / total
             print(f"Validation Accuracy: {accuracy:.4f}")
+
+            # Update SWA model if enabled
+            if self.swa is not None:
+                self.swa.update(epoch, self.model)
+
             # Save model if it's the best so far
             if accuracy > best_f1:
                 best_f1 = accuracy
@@ -151,10 +192,25 @@ class Trainer:
                 'loss': avg_train_loss,
             }, f"{self.config.work_dir}/checkpoint_epoch_{epoch+1}.pt")
 
+        # Save the final SWA model if enabled
+        if self.swa is not None and self.swa.swa_model is not None:
+            swa_model = self.swa.get_final_model()
+            torch.save(swa_model.state_dict(),
+                       f"{self.config.work_dir}/swa_model.pt")
+            # Update the model to use SWA weights for testing
+            self.model = swa_model
+
     def test(self):
         # Load the best model for inference
-        self.model.load_state_dict(torch.load(
-            f"{self.config.work_dir}/best_model.pt"))
+        if self.swa is not None and os.path.exists(f"{self.config.work_dir}/swa_model.pt"):
+            # Use SWA model if available
+            print("Using SWA model for inference")
+            self.model.load_state_dict(torch.load(
+                f"{self.config.work_dir}/swa_model.pt"))
+        else:
+            # Otherwise use the best model
+            self.model.load_state_dict(torch.load(
+                f"{self.config.work_dir}/best_model.pt"))
 
         # Convert test data to CoNLL format with O labels
         temp_conll_file = f"{self.config.work_dir}/temp_test.conll"

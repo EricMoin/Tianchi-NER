@@ -19,6 +19,17 @@ def convert_annotated_to_raw(input_path, output_path):
                 line = infile.readline()
 
 
+def convert_test_conll_to_raw(input_path, output_path):
+    with open(input_path, "r", encoding="utf-8") as infile, \
+            open(output_path, "w", encoding="utf-8") as outfile:
+        line = infile.readline()
+        while line:
+            outfile.write(line.split("\u0001")[1])
+            line = infile.readline()
+
+
 if __name__ == "__main__":
-    convert_annotated_to_raw("data/extra_test.txt",
-                             "data/extra_test_raw.txt")
+    # convert_annotated_to_raw("data/dev.conll",
+    #  "data/dev_raw.txt")
+    convert_test_conll_to_raw("data/final_test.txt",
+                              "data/test_raw.txt")
