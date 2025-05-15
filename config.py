@@ -16,7 +16,17 @@ class Config:
     label2id: dict[str, int]
     id2label: dict[int, str]
     adversarial_training_start_epoch: int
+    focal_loss_alpha: float
+    focal_loss_gamma: float
+    hybrid_loss_weight_crf: float
+    hybrid_loss_weight_focal: float
     crf_transition_penalty: float
+    spatial_dropout: float
+    embedding_dropout: float
+    use_swa: bool
+    swa_start_epoch: int
+    swa_lr: float
+    swa_freq: int
 
     def __init__(self,
                  train_file: str,
@@ -35,7 +45,17 @@ class Config:
                  freeze_bert_layers: int,
                  num_prefix_tokens: int,
                  adversarial_training_start_epoch: int,
+                 focal_loss_alpha: float,
+                 focal_loss_gamma: float,
+                 hybrid_loss_weight_crf: float,
+                 hybrid_loss_weight_focal: float,
                  crf_transition_penalty: float,
+                 spatial_dropout: float,
+                 embedding_dropout: float,
+                 use_swa: bool,
+                 swa_start_epoch: int,
+                 swa_lr: float,
+                 swa_freq: int,
                  ):
         self.train_file = train_file
         self.dev_file = dev_file
@@ -53,4 +73,14 @@ class Config:
         self.label2id = label2id
         self.id2label = id2label
         self.adversarial_training_start_epoch = adversarial_training_start_epoch
+        self.focal_loss_alpha = focal_loss_alpha
+        self.focal_loss_gamma = focal_loss_gamma
+        self.hybrid_loss_weight_crf = hybrid_loss_weight_crf
+        self.hybrid_loss_weight_focal = hybrid_loss_weight_focal
         self.crf_transition_penalty = crf_transition_penalty
+        self.spatial_dropout = spatial_dropout
+        self.embedding_dropout = embedding_dropout
+        self.use_swa = use_swa
+        self.swa_start_epoch = swa_start_epoch
+        self.swa_lr = swa_lr
+        self.swa_freq = swa_freq

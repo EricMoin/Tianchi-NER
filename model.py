@@ -5,6 +5,8 @@ from transformers import AutoModel, AutoTokenizer
 import torch
 import torch.nn.functional as F
 
+from config import Config
+
 
 class SpatialDropout(nn.Module):
     def __init__(self, drop_prob):
@@ -33,16 +35,16 @@ class SpatialDropout(nn.Module):
 
 
 class AddressNER(nn.Module):
-    def __init__(self, pretrained_model_name, num_labels, freeze_bert_layers=8, spatial_dropout=0.2, embedding_dropout=0.1):
+    def __init__(self, num_labels: int, config: Config):
         super(AddressNER, self).__init__()
-        self.bert = AutoModel.from_pretrained(pretrained_model_name)
-        self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
+        self.bert = AutoModel.from_pretrained(config.model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
 
         # Add embedding dropout
-        self.embedding_dropout = nn.Dropout(embedding_dropout)
+        self.embedding_dropout = nn.Dropout(config.embedding_dropout)
 
         # Add spatial dropout
-        self.spatial_dropout = SpatialDropout(spatial_dropout)
+        self.spatial_dropout = SpatialDropout(config.spatial_dropout)
 
         self.lstm = nn.LSTM(
             input_size=768,  # BERT hidden size
@@ -54,8 +56,20 @@ class AddressNER(nn.Module):
         self.classifier = nn.Linear(512, num_labels)
         self.crf = CRF(num_labels=num_labels)
 
+        # Initialize losses
+        self.crf_loss = CRFAwareLoss(
+            self.crf, transition_penalty=config.crf_transition_penalty)
+        self.focal_loss = FocalLoss(
+            num_labels, alpha=config.focal_loss_alpha, gamma=config.focal_loss_gamma)
+        self.hybrid_loss = HybridLoss(
+            self.crf_loss,
+            self.focal_loss,
+            crf_weight=config.hybrid_loss_weight_crf,
+            focal_weight=config.hybrid_loss_weight_focal
+        )
+
         # Freeze BERT layers
-        self._freeze_bert_layers(freeze_bert_layers)
+        self._freeze_bert_layers(config.freeze_bert_layers)
 
     def _freeze_bert_layers(self, num_layers_to_freeze):
         """Freeze the first num_layers_to_freeze layers of BERT"""
@@ -96,10 +110,8 @@ class AddressNER(nn.Module):
         logits = self.classifier(lstm_output)
 
         if labels is not None:
-            # During training, calculate the loss
-            # loss = -self.crf(logits, labels, mask=attention_mask.bool())
-            crf_loss = CRFAwareLoss(self.crf)
-            loss = crf_loss(logits, labels, attention_mask.bool())
+            # During training, calculate the hybrid loss
+            loss = self.hybrid_loss(logits, labels, attention_mask.bool())
             return loss.mean()
         else:
             # During inference, decode the best path
@@ -175,8 +187,8 @@ class CRFAwareLoss(nn.Module):
         batch_size, seq_len = tags.shape
         penalty = 0.0
         for i in range(seq_len - 1):
-            current_tags = tags[:, i]
-            next_tags = tags[:, i + 1]
+            current_tags = tags[:, i].to(self.transition_probs.device)
+            next_tags = tags[:, i + 1].to(self.transition_probs.device)
             # 对每对连续标签计算转移概率的负值（越小越合理）
             invalid_transitions = - \
                 torch.log(
@@ -186,3 +198,88 @@ class CRFAwareLoss(nn.Module):
         # 总损失 = CRF 损失 + 惩罚项
         total_loss = crf_loss + self.transition_penalty * penalty
         return total_loss
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, num_classes, alpha=0.25, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.num_classes = num_classes
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits, targets, mask):
+        """
+        计算Focal Loss
+
+        Args:
+            logits: 模型输出 [batch_size, seq_len, num_classes]
+            targets: 目标标签 [batch_size, seq_len]
+            mask: 有效位置掩码 [batch_size, seq_len]
+
+        Returns:
+            loss: 标量损失值
+        """
+        # 将logits转换为概率
+        probs = F.softmax(logits, dim=-1)
+
+        # 获取目标类别的概率
+        batch_size, seq_len, _ = logits.shape
+
+        # 创建one-hot编码
+        target_one_hot = F.one_hot(targets, self.num_classes).float()
+
+        # 计算每个位置的概率
+        pt = (probs * target_one_hot).sum(dim=-1)  # [batch_size, seq_len]
+
+        # 计算focal loss
+        focal_weight = (1 - pt) ** self.gamma
+        alpha_weight = torch.ones_like(pt) * self.alpha
+        alpha_weight = torch.where(
+            targets > 0, alpha_weight, 1 - alpha_weight)  # 对背景类使用1-alpha
+
+        # 计算交叉熵损失
+        ce_loss = F.cross_entropy(
+            logits.view(-1, self.num_classes),
+            targets.view(-1),
+            reduction='none'
+        ).view(batch_size, seq_len)
+
+        # 应用权重
+        loss = alpha_weight * focal_weight * ce_loss
+
+        # 应用掩码并执行reduction
+        loss = loss * mask.float()
+
+        if self.reduction == 'mean':
+            return loss.sum() / (mask.sum() + 1e-10)
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # 'none'
+            return loss
+
+
+class HybridLoss(nn.Module):
+    def __init__(self, crf_loss, focal_loss, crf_weight=0.5, focal_weight=0.5):
+        super(HybridLoss, self).__init__()
+        self.crf_loss = crf_loss
+        self.focal_loss = focal_loss
+        self.crf_weight = crf_weight
+        self.focal_weight = focal_weight
+
+    def forward(self, logits, targets, mask):
+        """
+        计算混合损失
+
+        Args:
+            logits: 模型输出 [batch_size, seq_len, num_classes]
+            targets: 目标标签 [batch_size, seq_len]
+            mask: 有效位置掩码 [batch_size, seq_len]
+
+        Returns:
+            loss: 标量损失值
+        """
+        crf_loss_val = self.crf_loss(logits, targets, mask)
+        focal_loss_val = self.focal_loss(logits, targets, mask)
+
+        return self.crf_weight * crf_loss_val + self.focal_weight * focal_loss_val
