@@ -1,6 +1,7 @@
 import torch.nn as nn
 from torch.utils.data import Dataset
-from TorchCRF import CRF
+# CRF and related losses are removed
+# from TorchCRF import CRF
 from transformers import AutoModel, AutoTokenizer
 import torch
 import torch.nn.functional as F
@@ -27,11 +28,62 @@ class SpatialDropout(nn.Module):
         # Shape: [batch_size, 1, hidden_dim]
         mask = torch.rand(batch_size, 1, hidden_dim,
                           device=inputs.device) > self.drop_prob
-        mask = mask.float() / (1 - self.drop_prob)  # Scale to maintain expected value
+        mask = mask.float() / (1 - self.drop_prob if self.drop_prob <
+                               1 else 1.0)  # Scale, avoid div by zero
 
         # Broadcast mask along sequence dimension without adding a new dimension
         # Final shape remains [batch_size, seq_len, hidden_dim]
         return inputs * mask
+
+
+class Biaffine(nn.Module):
+    def __init__(self, in_features, out_features, bias_start=True, bias_end=True):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features  # num_labels for spans
+
+        self.U = nn.Parameter(torch.Tensor(
+            out_features, in_features, in_features))
+        self.W_start = nn.Linear(in_features, out_features, bias=bias_start)
+        self.W_end = nn.Linear(in_features, out_features, bias=bias_end)
+        # If both W_start and W_end have bias, ensure they are not redundant or use a single separate bias
+        # For simplicity, let W_start handle the main bias, W_end can be bias=False or its bias adds if bias_end=True.
+        # If bias_start and bias_end are true, then effectively two bias terms contribute. Often one is set to False.
+        # Let's adjust: W_start with bias, W_end without to avoid redundancy if a single overall bias per label is desired.
+        if bias_start and bias_end:  # A common setup
+            # Allow both for flexibility
+            self.W_end = nn.Linear(in_features, out_features, bias=True)
+        elif bias_start:  # W_start has bias, W_end no bias
+            self.W_end = nn.Linear(in_features, out_features, bias=False)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.U)
+        # nn.Linear layers (W_start, W_end) are initialized by default
+
+    def forward(self, start_reps, end_reps):
+        # start_reps: [batch, seq_len, in_features]
+        # end_reps: [batch, seq_len, in_features]
+        # U: [out_features, in_features, in_features]
+
+        # Bilinear term: (h_i^start)^T U_l h_j^end
+        # [B, Out, S_start, In]
+        bilin_left = torch.einsum('bsi,oij->bosj', start_reps, self.U)
+        span_scores_bilinear = torch.einsum(
+            'bosj,bej->bose', bilin_left, end_reps)  # [B, Out, S_start, S_end]
+        span_scores_bilinear = span_scores_bilinear.permute(
+            0, 2, 3, 1)  # [B, S_start, S_end, Out]
+
+        # Linear terms for start and end tokens
+        scores_start = self.W_start(start_reps)  # [B, S_start, Out]
+        scores_end = self.W_end(end_reps)    # [B, S_end, Out]
+
+        # Combine: span_scores_bilinear + scores_start (broadcasted over S_end) + scores_end (broadcasted over S_start)
+        span_scores = span_scores_bilinear + \
+            scores_start.unsqueeze(2) + scores_end.unsqueeze(1)
+
+        return span_scores  # [batch, seq_len_start, seq_len_end, out_features]
 
 
 class AddressNER(nn.Module):
@@ -39,34 +91,27 @@ class AddressNER(nn.Module):
         super(AddressNER, self).__init__()
         self.bert = AutoModel.from_pretrained(config.model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+        self.config = config  # Save config
+        self.num_labels = num_labels  # Number of span types including 'O'
 
-        # Add embedding dropout
         self.embedding_dropout = nn.Dropout(config.embedding_dropout)
-
-        # Add spatial dropout
         self.spatial_dropout = SpatialDropout(config.spatial_dropout)
 
-        self.lstm = nn.LSTM(
-            input_size=768,  # BERT hidden size
-            hidden_size=256,
-            num_layers=2,
-            bidirectional=True,
-            batch_first=True
-        )
-        self.classifier = nn.Linear(512, num_labels)
-        self.crf = CRF(num_labels=num_labels)
+        bert_hidden_size = self.bert.config.hidden_size  # Typically 768
 
-        # Initialize losses
-        self.crf_loss = CRFAwareLoss(
-            self.crf, transition_penalty=config.crf_transition_penalty)
-        self.focal_loss = FocalLoss(
-            num_labels, alpha=config.focal_loss_alpha, gamma=config.focal_loss_gamma)
-        self.hybrid_loss = HybridLoss(
-            self.crf_loss,
-            self.focal_loss,
-            crf_weight=config.hybrid_loss_weight_crf,
-            focal_weight=config.hybrid_loss_weight_focal
-        )
+        # MLPs for start and end representations
+        self.mlp_start = nn.Linear(
+            bert_hidden_size, config.biaffine_hidden_dim)
+        self.mlp_end = nn.Linear(bert_hidden_size, config.biaffine_hidden_dim)
+
+        # Biaffine layer for span scoring
+        self.biaffine = Biaffine(config.biaffine_hidden_dim, num_labels)
+
+        # Loss function (CrossEntropyLoss for span classification)
+        # Assumes config.ignore_index is defined, e.g., -100
+        # Assumes config.O_label_id is defined for non-entity spans
+        self.loss_fct = nn.CrossEntropyLoss(
+            ignore_index=getattr(config, 'ignore_index', -100))
 
         # Freeze BERT layers
         self._freeze_bert_layers(config.freeze_bert_layers)
@@ -76,57 +121,118 @@ class AddressNER(nn.Module):
         if num_layers_to_freeze <= 0:
             return
 
-        # Always freeze embeddings
         for param in self.bert.embeddings.parameters():
             param.requires_grad = False
 
-        # Freeze the first n encoder layers
         for layer_idx in range(min(num_layers_to_freeze, len(self.bert.encoder.layer))):
             for param in self.bert.encoder.layer[layer_idx].parameters():
                 param.requires_grad = False
 
-    def forward(self, input_ids, attention_mask, labels=None):
-        # Apply embedding dropout directly to the input embeddings
+    # labels renamed to span_labels_gold
+    def forward(self, input_ids, attention_mask, span_labels_gold=None):
         if self.training:
-            # Get the embeddings
             embeddings = self.bert.embeddings.word_embeddings(input_ids)
-            # Apply dropout to embeddings
             embeddings = self.embedding_dropout(embeddings)
-            # Pass modified embeddings through BERT
             outputs = self.bert(inputs_embeds=embeddings,
                                 attention_mask=attention_mask)
         else:
             outputs = self.bert(input_ids=input_ids,
                                 attention_mask=attention_mask)
 
-        bert_output = outputs.last_hidden_state  # [batch, seq_len, 768]
-
-        # Apply spatial dropout to BERT output
+        # [batch, seq_len, bert_hidden_size]
+        bert_output = outputs.last_hidden_state
         bert_output = self.spatial_dropout(bert_output)
 
-        # Pass BERT output directly to LSTM
-        lstm_output, _ = self.lstm(bert_output)
+        # Get start and end representations using MLPs
+        # [B, S, biaffine_hidden_dim]
+        start_reps = F.relu(self.mlp_start(bert_output))
+        # [B, S, biaffine_hidden_dim]
+        end_reps = F.relu(self.mlp_end(bert_output))
 
-        logits = self.classifier(lstm_output)
+        # Get span logits from Biaffine layer
+        # span_logits: [batch, seq_len_start, seq_len_end, num_labels]
+        span_logits = self.biaffine(start_reps, end_reps)
 
-        if labels is not None:
-            # During training, calculate the hybrid loss
-            loss = self.hybrid_loss(logits, labels, attention_mask.bool())
-            return loss.mean()
+        if span_labels_gold is not None:
+            # Training mode: Calculate loss
+            # span_labels_gold: [batch, seq_len, seq_len], with target class indices or ignore_index
+
+            # Mask for active spans to consider in loss
+            seq_len = span_logits.shape[1]
+            upper_triangular_mask = torch.triu(
+                torch.ones(seq_len, seq_len,
+                           device=span_logits.device, dtype=torch.bool)
+            )
+            start_token_mask = attention_mask.unsqueeze(2)  # [B, S_start, 1]
+            end_token_mask = attention_mask.unsqueeze(1)    # [B, 1, S_end]
+            # [B, S_start, S_end]
+            valid_span_padding_mask = start_token_mask & end_token_mask
+
+            active_span_mask = upper_triangular_mask.unsqueeze(
+                0) & valid_span_padding_mask  # [B, S, S]
+
+            if hasattr(self.config, 'max_span_length') and self.config.max_span_length > 0 and self.config.max_span_length < seq_len:
+                indices = torch.arange(seq_len, device=span_logits.device)
+                span_lengths = indices.unsqueeze(
+                    0) - indices.unsqueeze(1) + 1  # [S,S] lengths
+                max_len_mask = (span_lengths <= self.config.max_span_length) & (
+                    span_lengths > 0)  # Ensure positive length
+                active_span_mask = active_span_mask & max_len_mask.unsqueeze(0)
+
+            # Reshape for potentially more memory-efficient selection
+            # span_logits: [batch, seq_len_start, seq_len_end, num_labels]
+            # active_span_mask: [batch, seq_len_start, seq_len_end]
+            # span_labels_gold: [batch, seq_len_start, seq_len_end]
+
+            num_active_spans = active_span_mask.sum()
+            if num_active_spans == 0:
+                return torch.tensor(0.0, device=span_logits.device, requires_grad=True)
+
+            # Flatten logits, targets, and mask
+            # Batch dimension is kept, other dimensions are flattened, then select based on mask
+            batch_size = span_logits.shape[0]
+            flat_logits = span_logits.view(
+                batch_size, -1, self.num_labels)  # [B, S*S, NumLabels]
+            flat_targets = span_labels_gold.view(
+                batch_size, -1)            # [B, S*S]
+            flat_active_mask = active_span_mask.view(
+                batch_size, -1)       # [B, S*S]
+
+            # Select active elements for each batch item, then concatenate
+            # This avoids creating a giant intermediate tensor if global sum of active_span_mask is huge
+            active_logits_list = []
+            active_targets_list = []
+            for i in range(batch_size):
+                active_logits_list.append(flat_logits[i][flat_active_mask[i]])
+                active_targets_list.append(
+                    flat_targets[i][flat_active_mask[i]])
+
+            # [TotalActiveSpans, NumLabels]
+            active_logits = torch.cat(active_logits_list, dim=0)
+            active_targets = torch.cat(
+                active_targets_list, dim=0)  # [TotalActiveSpans]
+
+            if active_targets.numel() == 0:
+                return torch.tensor(0.0, device=span_logits.device, requires_grad=True)
+
+            loss = self.loss_fct(active_logits, active_targets)
+            return loss
         else:
-            # During inference, decode the best path
-            return self.crf.viterbi_decode(logits, mask=attention_mask.bool())
+            # Inference mode: return raw span_logits
+            # Decoding of spans (finding best spans, converting to token tags) should be handled by the Trainer/evaluation script
+            return span_logits
 
-    def __len__(self):
-        return len(self.data)
+    # __len__ method removed as it was incorrect
+
+# PGD class remains the same as it operates on model parameters and gradients
 
 
 class PGD:
     def __init__(self, model, epsilon=0.68, alpha=0.3, steps=2):
         self.model = model
-        self.epsilon = epsilon  # Maximum perturbation
-        self.alpha = alpha      # Step size
-        self.steps = steps      # Number of attack iterations
+        self.epsilon = epsilon
+        self.alpha = alpha
+        self.steps = steps
         self.backup = {}
         self.emb_backup = {}
 
@@ -135,19 +241,15 @@ class PGD:
             if param.requires_grad and emb_name in name:
                 if is_first_attack:
                     self.emb_backup[name] = param.data.clone()
-                    # 保存初始参数
                     self.backup[name] = param.data.clone()
 
                 norm = torch.norm(param.grad)
-                if norm != 0:
+                if norm != 0 and not torch.isnan(norm):  # Add isnan check
                     r_at = self.alpha * param.grad / norm
                     param.data.add_(r_at)
-
-                    # 投影回 epsilon 球
                     param.data = self.project(name, param.data, self.epsilon)
 
     def project(self, param_name, param_data, epsilon):
-        # 将扰动投影到epsilon球上
         delta = param_data - self.emb_backup[param_name]
         norm = torch.norm(delta)
         if norm > epsilon:
@@ -157,129 +259,18 @@ class PGD:
     def restore(self, emb_name='bert.embeddings.word_embeddings.weight'):
         for name, param in self.model.named_parameters():
             if param.requires_grad and emb_name in name:
-                assert name in self.backup
-                param.data = self.backup[name]
+                if name in self.backup:  # Ensure key exists before restoring
+                    param.data = self.backup[name]
         self.backup = {}
 
     def restore_emb(self, emb_name='bert.embeddings.word_embeddings.weight'):
         for name, param in self.model.named_parameters():
             if param.requires_grad and emb_name in name:
-                assert name in self.emb_backup
-                param.data = self.emb_backup[name]
-        self.emb_backup = {}
+                if name in self.emb_backup:  # Ensure key exists
+                    param.data = self.emb_backup[name]
+        # self.emb_backup = {} # emb_backup should be persistent across attack steps within an iteration
 
-
-class CRFAwareLoss(nn.Module):
-    def __init__(self, crf: CRF, transition_penalty=0.175):
-        super().__init__()
-        self.crf = crf
-        self.transition_probs = F.softmax(
-            self.crf.trans_matrix, dim=1).detach()
-        self.transition_penalty = transition_penalty
-        # 获取 CRF 的转移矩阵（形状: [num_tags, num_tags]）
-        self.transition_matrix = crf.trans_matrix.detach()
-
-    def forward(self, emissions, tags, mask):
-        # 常规 CRF 负对数似然损失
-        crf_loss = -self.crf(emissions, tags, mask=mask)
-
-        # 计算标签转移的不合理性惩罚
-        batch_size, seq_len = tags.shape
-        penalty = 0.0
-        for i in range(seq_len - 1):
-            current_tags = tags[:, i].to(self.transition_probs.device)
-            next_tags = tags[:, i + 1].to(self.transition_probs.device)
-            # 对每对连续标签计算转移概率的负值（越小越合理）
-            invalid_transitions = - \
-                torch.log(
-                    self.transition_probs[current_tags, next_tags] + 1e-8)
-            penalty += invalid_transitions.mean()
-
-        # 总损失 = CRF 损失 + 惩罚项
-        total_loss = crf_loss + self.transition_penalty * penalty
-        return total_loss
-
-
-class FocalLoss(nn.Module):
-    def __init__(self, num_classes, alpha=0.25, gamma=2.0, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.num_classes = num_classes
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, logits, targets, mask):
-        """
-        计算Focal Loss
-
-        Args:
-            logits: 模型输出 [batch_size, seq_len, num_classes]
-            targets: 目标标签 [batch_size, seq_len]
-            mask: 有效位置掩码 [batch_size, seq_len]
-
-        Returns:
-            loss: 标量损失值
-        """
-        # 将logits转换为概率
-        probs = F.softmax(logits, dim=-1)
-
-        # 获取目标类别的概率
-        batch_size, seq_len, _ = logits.shape
-
-        # 创建one-hot编码
-        target_one_hot = F.one_hot(targets, self.num_classes).float()
-
-        # 计算每个位置的概率
-        pt = (probs * target_one_hot).sum(dim=-1)  # [batch_size, seq_len]
-
-        # 计算focal loss
-        focal_weight = (1 - pt) ** self.gamma
-        alpha_weight = torch.ones_like(pt) * self.alpha
-        alpha_weight = torch.where(
-            targets > 0, alpha_weight, 1 - alpha_weight)  # 对背景类使用1-alpha
-
-        # 计算交叉熵损失
-        ce_loss = F.cross_entropy(
-            logits.view(-1, self.num_classes),
-            targets.view(-1),
-            reduction='none'
-        ).view(batch_size, seq_len)
-
-        # 应用权重
-        loss = alpha_weight * focal_weight * ce_loss
-
-        # 应用掩码并执行reduction
-        loss = loss * mask.float()
-
-        if self.reduction == 'mean':
-            return loss.sum() / (mask.sum() + 1e-10)
-        elif self.reduction == 'sum':
-            return loss.sum()
-        else:  # 'none'
-            return loss
-
-
-class HybridLoss(nn.Module):
-    def __init__(self, crf_loss, focal_loss, crf_weight=0.5, focal_weight=0.5):
-        super(HybridLoss, self).__init__()
-        self.crf_loss = crf_loss
-        self.focal_loss = focal_loss
-        self.crf_weight = crf_weight
-        self.focal_weight = focal_weight
-
-    def forward(self, logits, targets, mask):
-        """
-        计算混合损失
-
-        Args:
-            logits: 模型输出 [batch_size, seq_len, num_classes]
-            targets: 目标标签 [batch_size, seq_len]
-            mask: 有效位置掩码 [batch_size, seq_len]
-
-        Returns:
-            loss: 标量损失值
-        """
-        crf_loss_val = self.crf_loss(logits, targets, mask)
-        focal_loss_val = self.focal_loss(logits, targets, mask)
-
-        return self.crf_weight * crf_loss_val + self.focal_weight * focal_loss_val
+# Removed CRFAwareLoss, FocalLoss, HybridLoss classes
+# class CRFAwareLoss(nn.Module): ...
+# class FocalLoss(nn.Module): ...
+# class HybridLoss(nn.Module): ...
