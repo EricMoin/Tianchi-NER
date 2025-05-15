@@ -1,13 +1,13 @@
 import os
 import random
-import re
 import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from transformers import (
     AutoTokenizer,
     AutoModelForMaskedLM,
-    get_linear_schedule_with_warmup
+    get_linear_schedule_with_warmup,
+    DataCollatorForWholeWordMask
 )
 from tqdm import tqdm
 import logging
@@ -22,11 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 class DomainDataset(Dataset):
-    def __init__(self, texts, tokenizer, max_length=128, whole_word_mask=False):
+    def __init__(self, texts, tokenizer, max_length=128):
         self.texts = texts
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.whole_word_mask = whole_word_mask
 
     def __len__(self):
         return len(self.texts)
@@ -61,87 +60,6 @@ def read_domain_corpus(file_path):
     return texts
 
 
-def create_masked_input(input_ids, tokenizer, mask_probability=0.15, whole_word_mask=False):
-    """创建掩码输入:
-       - 当whole_word_mask为True时，掩码整个词
-       - 当whole_word_mask为False时，随机掩码单个token
-    """
-    labels = input_ids.clone()
-    probability_matrix = torch.full(labels.shape, mask_probability)
-
-    # 创建特殊token的掩码（不对特殊token进行掩码）
-    special_tokens_mask = torch.tensor([
-        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True)
-        for val in labels.tolist()
-    ])
-    probability_matrix.masked_fill_(special_tokens_mask.bool(), value=0.0)
-
-    # 获取注意力掩码
-    padding_mask = labels.eq(tokenizer.pad_token_id)
-    padding_mask = padding_mask.to(probability_matrix.device)
-    probability_matrix.masked_fill_(padding_mask, value=0.0)
-
-    if whole_word_mask:
-        # 批处理方式实现全词掩码
-        for i in range(input_ids.size(0)):  # 遍历batch中的每个样本
-            # 为当前样本创建词掩码
-            word_begins = []  # 记录词开始的位置
-            word_ends = []    # 记录词结束的位置
-
-            # 标记哪些位置有效（非特殊token，非填充）
-            valid_positions = (
-                ~special_tokens_mask[i].bool() & ~padding_mask[i]).tolist()
-            tokens = [tokenizer.convert_ids_to_tokens(
-                input_ids[i, j].item()) for j in range(len(input_ids[i]))]
-
-            # 识别词边界
-            j = 0
-            while j < len(valid_positions):
-                if not valid_positions[j]:
-                    j += 1
-                    continue
-
-                # 词的开始
-                if not tokens[j].startswith('##'):
-                    word_start = j
-                    j += 1
-                    # 查找词的结束
-                    while j < len(valid_positions) and valid_positions[j] and tokens[j].startswith('##'):
-                        j += 1
-                    word_end = j - 1
-
-                    word_begins.append(word_start)
-                    word_ends.append(word_end)
-                else:
-                    j += 1
-
-            # 决定哪些词要被掩码
-            for start, end in zip(word_begins, word_ends):
-                # 以mask_probability的概率决定掩码整个词
-                if random.random() < mask_probability:
-                    probability_matrix[i, start:end+1] = 1.0
-
-    # 选择需要掩码的token
-    masked_indices = torch.bernoulli(probability_matrix).bool()
-    labels[~masked_indices] = -100  # 将未掩码的位置设为-100，这样它们在计算损失时会被忽略
-
-    # 80%的掩码token替换为[MASK]
-    indices_replaced = torch.bernoulli(torch.full(
-        labels.shape, 0.8)).bool() & masked_indices
-    input_ids[indices_replaced] = tokenizer.convert_tokens_to_ids(
-        tokenizer.mask_token)
-
-    # 10%的掩码token替换为随机token
-    indices_random = torch.bernoulli(torch.full(
-        labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
-    random_words = torch.randint(
-        len(tokenizer), labels.shape, dtype=torch.long)
-    input_ids[indices_random] = random_words[indices_random].to(
-        input_ids.device)
-
-    return input_ids, labels
-
-
 def train(args):
     """训练函数"""
     # 设置随机种子
@@ -165,8 +83,21 @@ def train(args):
 
     # 创建dataset
     dataset = DomainDataset(
-        texts, tokenizer, max_length=args.max_length, whole_word_mask=args.whole_word_mask)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+        texts, tokenizer, max_length=args.max_length)
+
+    # 创建数据整理器用于全词掩码
+    data_collator = DataCollatorForWholeWordMask(
+        tokenizer=tokenizer,
+        mlm=True,
+        mlm_probability=args.mask_probability
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=data_collator
+    )
 
     # 准备训练
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -204,23 +135,12 @@ def train(args):
         epoch_loss = 0
         for step, batch in enumerate(epoch_iterator):
             model.train()
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
 
-            # 创建掩码输入
-            masked_input_ids, labels = create_masked_input(
-                input_ids.clone(),
-                tokenizer,
-                mask_probability=args.mask_probability,
-                whole_word_mask=args.whole_word_mask
-            )
+            # 将数据移到设备上
+            batch = {k: v.to(device) for k, v in batch.items()}
 
-            # 前向传播
-            outputs = model(
-                input_ids=masked_input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
+            # 前向传播 (data_collator已经处理了掩码)
+            outputs = model(**batch)
             loss = outputs.loss
             epoch_loss += loss.item()
 
@@ -266,7 +186,7 @@ def train(args):
 
 if __name__ == "__main__":
     class Args:
-        model_name = "hfl/chinese-bert-wwm"
+        model_name = "hfl/chinese-roberta-wwm-ext"
         train_file = "data/address.txt"  # 地址语料文件
         output_dir = "pretrained/address_adapted_model"
         max_length = 128
@@ -279,18 +199,12 @@ if __name__ == "__main__":
         warmup_steps = 0
         save_steps = 500
         mask_probability = 0.15
-        seed = 42
-        whole_word_mask = True  # 开启全词掩码
+        seed = 2025
 
     args = Args()
 
-    # 提供选择全词掩码或随机掩码的功能
     import argparse
     parser = argparse.ArgumentParser(description="领域适配预训练")
-    parser.add_argument("--whole_word_mask",
-                        action="store_true", help="使用全词掩码")
-    parser.add_argument("--random_mask", action="store_false",
-                        dest="whole_word_mask", help="使用随机掩码")
     parser.add_argument("--train_file", type=str,
                         default=args.train_file, help="领域语料文件")
     parser.add_argument("--output_dir", type=str,
@@ -299,17 +213,14 @@ if __name__ == "__main__":
                         default=args.model_name, help="基础预训练模型名称")
     parser.add_argument("--num_epochs", type=int,
                         default=args.num_train_epochs, help="训练轮数")
-    parser.set_defaults(whole_word_mask=True)
 
     parsed_args = parser.parse_args()
-    args.whole_word_mask = parsed_args.whole_word_mask
     args.train_file = parsed_args.train_file
     args.output_dir = parsed_args.output_dir
     args.model_name = parsed_args.model_name
     args.num_train_epochs = parsed_args.num_epochs
 
-    mask_type = "全词掩码" if args.whole_word_mask else "随机掩码"
-    logger.info(f"使用{mask_type}进行领域适配预训练")
+    logger.info("使用全词掩码进行领域适配预训练")
 
     output_dir = train(args)
     logger.info(f"领域适配预训练完成，模型保存在 {output_dir}")

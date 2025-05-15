@@ -89,6 +89,11 @@ def main():
         swa_start_epoch=0,
         swa_lr=1e-5,
         swa_freq=2,
+        focal_loss_alpha=0.25,
+        focal_loss_gamma=1.5,
+        hybrid_loss_weight_crf=0.5,
+        hybrid_loss_weight_focal=0.5,
+        crf_transition_penalty=0.175,
     )
     train_reader = ConllReader(config.train_file)
     dev_reader = ConllReader(config.dev_file)
@@ -121,7 +126,7 @@ def main():
         device=config.device,
     )
 
-    # trainer.train()
+    trainer.train()
 
     trainer.test()
 
