@@ -4,3 +4,6 @@
 数据集的来源很重要，在微调大模型时不手动加入规则匹配的prompt也可以带来更好的收益
 auto_cast 可能导致结果的精度相差较大
 较多的扰动step会导致由于预训练模型而敏感
+
+
+5-fold + pseudo tag + electra base pretrain + electra large pretrain + extra data + finetune + spatial dropout + embedding dropout  + FGM + biaffine + google bert
