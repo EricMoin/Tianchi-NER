@@ -83,7 +83,7 @@ class ResultWriter:
             logger.error(f"写入CoNLL输出到 {output_path} 失败: {e}")
             return False
 
-    def process_final_submission_output(ensembled_conll_pred_file: str, final_submission_file: str, original_test_file_path: str):
+    def process_final_submission_output(self, ensembled_conll_pred_file: str, final_submission_file: str, original_test_file_path: str):
         logger.info(
             f"正在处理 {ensembled_conll_pred_file} 为最终提交格式 {final_submission_file}")
         original_test_data = []  # 存储原始测试数据
