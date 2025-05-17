@@ -2,6 +2,7 @@ import logging
 import os
 import torch
 from config import Config
+from conll_reader import ConllEntity
 from dataset import NERDataset
 from label import LabelMap
 from model import AddressNER
@@ -23,7 +24,7 @@ class Predictor:
         self.device = torch.device(self.model_config.device)
 
         # Instantiate the model structure. Weights will be loaded per fold.
-        self.model = AddressNER(num_labels=len(self.model_config.label_map.label_list),
+        self.model = AddressNER(num_labels=len(self.model_config.label_map.labels),
                                 config=self.model_config)
         self.model.to(self.device)
         logger.info(
@@ -103,23 +104,15 @@ class Predictor:
                 f"Predictor: No character tokens extracted from test file {test_file_path}.")
             return []
 
-        # NERDataset expects list of "Sentence" like objects or data that can be processed.
-        # We adapt by creating temporary structures or ensuring NERDataset can handle char lists.
-        # For NERDataset, we need tokens and dummy labels.
-        class TempSentence:  # Helper class to mimic CoNLL sentence structure for NERDataset
-            def __init__(self, tokens):
-                self.tokens = tokens
-                self.labels = ['O'] * len(tokens)  # Dummy labels for test data
-
-        test_conll_examples = [TempSentence(chars)
+        test_conll_examples = [ConllEntity(chars, ['O'] * len(chars))
                                for chars in test_sentences_char_tokens]
 
         # Tokenizer comes from self.model (AddressNER instance initialized with model_init_config)
         # label_map.label2id is used by NERDataset
         test_dataset = NERDataset(
-            examples=test_conll_examples,
+            data=test_conll_examples,
             tokenizer=self.model.tokenizer,
-            label2id=label_map.label2id  # Use label_map from main_cfg
+            label_map=label_map.label2id  # Use label_map from main_cfg
         )
         test_dataloader = DataLoader(
             test_dataset, batch_size=batch_size, shuffle=False)

@@ -1,16 +1,15 @@
 import os
 from result_writer import ResultWriter
 from sentence_reader import SentenceReader
-from main import write_ensembled_predictions_conll_format, process_final_submission_output
 from config import Config
 from logger import logger
 
 
 def main():
     config = Config('config.yaml')
+    config.work_dir = os.path.join(config.work_dir, 'pretrained')
     result_writer = ResultWriter(
-        adapted_model_path=config.adapted_model_path,
-        work_dir=config.work_dir
+        config=config
     )
 
     fold_dirs_to_predict = result_writer.discover_fold_work_dirs(
