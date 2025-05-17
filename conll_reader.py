@@ -34,3 +34,14 @@ class ConllReader:
                     labels.append(splits[-1].rstrip())
             if tokens:
                 yield ConllEntity(tokens, labels)
+
+
+class MultiConllReader:
+    def __init__(self, conll_files: list[str]):
+        self.conll_files = conll_files
+
+    def read(self):
+        for conll_file in self.conll_files:
+            reader = ConllReader(conll_file)
+            for entity in reader.read():
+                yield entity

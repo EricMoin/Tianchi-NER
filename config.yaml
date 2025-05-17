@@ -1,0 +1,63 @@
+# General Settings
+train_file: 'data/train.conll'
+dev_file: 'data/dev.conll'
+test_file: 'data/final_test.txt' # Original test file for submission processing
+output_file: 'result/ensembled_submission.txt' # Final submission output file
+work_dir: 'result' # Base work directory for intermediate files, models, logs
+device: 'cuda' # 'cuda' or 'cpu'
+seed: 2025
+
+# Model & Training Hyperparameters
+model_name: 'pretrained/address_adapted_model' # Default model for training if adaptation is skipped or for a single run
+batch_size: 16
+num_epochs: 3
+learning_rate: 2.0e-5
+weight_decay: 0.01
+freeze_bert_layers: 0
+
+# Loss Function & Regularization
+crf_transition_penalty: 0.175
+focal_loss_alpha: 0.25
+focal_loss_gamma: 1.5
+hybrid_loss_weight_crf: 0.5
+hybrid_loss_weight_focal: 0.5
+spatial_dropout: 0.15
+embedding_dropout: 0.15
+
+# Stochastic Weight Averaging (SWA)
+use_swa: true
+swa_start_epoch: 0
+swa_lr: 1.0e-5
+swa_freq: 1
+
+# Adversarial Training
+adversarial_training_start_epoch: 0 # Epoch to start adversarial training (e.g., FGM)
+
+# Labeling Schema
+label_map:
+  labels:
+    - 'prov'
+    - 'city'
+    - 'district'
+    - 'devzone'
+    - 'town'
+    - 'community'
+    - 'village_group'
+    - 'road'
+    - 'roadno'
+    - 'poi'
+    - 'subpoi'
+    - 'houseno'
+    - 'cellno'
+    - 'floorno'
+    - 'roomno'
+    - 'detail'
+    - 'assist'
+    - 'distance'
+    - 'intersection'
+    - 'redundant'
+    - 'others'
+  type: 'BIOES'
+
+# K-Fold Cross-Validation
+k_folds: 5
