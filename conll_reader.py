@@ -12,14 +12,8 @@ class ConllEntity:
 
 
 class ConllReader:
-    tokens: list[str]
-    labels: list[str]
-
-    def __init__(self, conll_file: str):
-        self.conll_file = conll_file
-
-    def read(self):
-        with open(self.conll_file, 'r', encoding='utf8') as f:
+    def read(self, conll_file: str):
+        with open(conll_file, 'r', encoding='utf8') as f:
             tokens = []
             labels = []
             for line in f:
@@ -34,3 +28,11 @@ class ConllReader:
                     labels.append(splits[-1].rstrip())
             if tokens:
                 yield ConllEntity(tokens, labels)
+
+
+class MultiConllReader:
+
+    def read(self, conll_file: str):
+        reader = ConllReader()
+        for entity in reader.read(conll_file):
+            yield entity

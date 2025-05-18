@@ -1,135 +1,37 @@
 import os
-from conll_reader import ConllReader
-from dataset import NERDataset
-from model import AddressNER
+import numpy as np
+import torch
+import random
 from config import Config
-from torch.utils.data import DataLoader
+from trainer import KFoldTrainer, SingleTrainer  # Updated import
+# For reading train/dev data from dataset import NERDataset # For creating datasets for training
+# For creating DataLoaders for training
 
-from trainer import Trainer
+# Setup logging
+from logger import logger
 
 
-def get_result():
-    path = os.getcwd()
-    exp_dir = os.path.join(path, 'result')
-    os.makedirs(exp_dir, exist_ok=True)
-    with open(f'{exp_dir}/pred.txt', 'r', encoding='utf8') as fin, \
-            open(f'{exp_dir}/result.pred.txt', 'w', encoding='utf8') as fout:
-        guid = 1
-        tokens = []
-        labels = []
-        is_orig = True
-        for line in fin:
-            if line == '' or line == '\n':
-                if tokens:
-                    print(guid, ''.join(tokens), ' '.join(
-                        labels), sep='\u0001', file=fout)
-                    guid += 1
-                    tokens = []
-                    labels = []
-                    is_orig = True
-            else:
-                splits = line.split('\t')
-                if splits[0] == '<EOS>':
-                    is_orig = False
-                if is_orig:
-                    tokens.append(splits[0])
-                    labels.append(splits[-1].rstrip())
-        if tokens:
-            print(guid, ''.join(tokens), ' '.join(
-                labels), sep='\u0001', file=fout)
+def set_seed(seed_value):
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    torch.manual_seed(seed_value)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed_value)
+    logger.info(f"Seed set to {seed_value}")
 
 
 def main():
-    label_list = [
-        'B-prov', 'I-prov', 'E-prov', 'S-prov',
-        'B-city', 'I-city', 'E-city', 'S-city',
-        'B-district', 'I-district', 'E-district', 'S-district',
-        'B-devzone', 'I-devzone', 'E-devzone', 'S-devzone',
-        'B-town', 'I-town', 'E-town', 'S-town',
-        'B-community', 'I-community', 'E-community', 'S-community',
-        'B-village_group', 'I-village_group', 'E-village_group', 'S-village_group',
-        'B-road', 'I-road', 'E-road', 'S-road',
-        'B-roadno', 'I-roadno', 'E-roadno', 'S-roadno',
-        'B-poi', 'I-poi', 'E-poi', 'S-poi',
-        'B-subpoi', 'I-subpoi', 'E-subpoi', 'S-subpoi',
-        'B-houseno', 'I-houseno', 'E-houseno', 'S-houseno',
-        'B-cellno', 'I-cellno', 'E-cellno', 'S-cellno',
-        'B-floorno', 'I-floorno', 'E-floorno', 'S-floorno',
-        'B-roomno', 'I-roomno', 'E-roomno', 'S-roomno',
-        'B-detail', 'I-detail', 'E-detail', 'S-detail',
-        'B-assist', 'I-assist', 'E-assist', 'S-assist',
-        'B-distance', 'I-distance', 'E-distance', 'S-distance',
-        'B-intersection', 'I-intersection', 'E-intersection', 'S-intersection',
-        'B-redundant', 'I-redundant', 'E-redundant', 'S-redundant',
-        'B-others', 'I-others', 'E-others', 'S-others',
-        'O'
-    ]
-    id2label = {i: label for i, label in enumerate(label_list)}
-    label2id = {label: i for i, label in enumerate(label_list)}
-    config = Config(
-        train_file='data/train.conll',
-        dev_file='data/dev.conll',
-        test_file='data/final_test.txt',
-        output_file='result/prediction.conll',
-        model_name='pretrained/address_adapted_model',
-        batch_size=16,
-        num_epochs=15,
-        learning_rate=2e-5,
-        weight_decay=0.01,
-        device='cuda',
-        work_dir='result',
-        freeze_bert_layers=0,
-        num_prefix_tokens=20,
-        label2id=label2id,
-        id2label=id2label,
-        adversarial_training_start_epoch=3,
-        crf_transition_penalty=0.175,
-        focal_loss_alpha=0.25,
-        focal_loss_gamma=1.5,
-        hybrid_loss_weight_crf=0.5,
-        hybrid_loss_weight_focal=0.5,
-        spatial_dropout=0.2,
-        embedding_dropout=0.1,
-        use_swa=True,
-        swa_start_epoch=0,
-        swa_lr=1e-5,
-        swa_freq=2,
-    )
-    train_reader = ConllReader(config.train_file)
-    dev_reader = ConllReader(config.dev_file)
+    # Load main configuration
+    # The Config class now loads from YAML within its __init__
+    config = Config(config_path='config.yaml')
 
-    train_conll = list(train_reader.read())
-    dev_conll = list(dev_reader.read())
+    set_seed(config.seed)
+    os.makedirs(config.work_dir, exist_ok=True)  # Main work directory
 
-    print("len(label_list):", len(label_list))
-    print("label_list:", label_list)
-
-    model = AddressNER(
-        num_labels=len(label_list),
-        config=config
-    )
-
-    train_dataset = NERDataset(train_conll, model.tokenizer, label2id)
-    dev_dataset = NERDataset(dev_conll, model.tokenizer, label2id)
-
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size,
-                              shuffle=True)
-    dev_loader = DataLoader(dev_dataset, batch_size=config.batch_size,
-                            shuffle=False)
-
-    trainer = Trainer(
-        config=config,
-        model=model,
-        train_dataloader=train_loader,
-        val_dataloader=dev_loader,
-        device=config.device,
-    )
-
+    # trainer = KFoldTrainer(config=config)
+    # trainer.kfold_train()
+    trainer = SingleTrainer(config=config)
     trainer.train()
-
-    trainer.test()
-
-    get_result()
 
 
 if __name__ == "__main__":
