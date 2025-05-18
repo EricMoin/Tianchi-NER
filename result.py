@@ -12,15 +12,13 @@ def main():
         config=config
     )
 
-    fold_dirs_to_predict = result_writer.discover_fold_work_dirs(
+    # fold_dirs_to_predict = result_writer.discover_fold_work_dirs(
+    #     main_work_dir=config.work_dir)
+    dirs_to_predict = result_writer.discover_work_dirs(
         main_work_dir=config.work_dir)
 
-    if fold_dirs_to_predict:
-        result_writer.run_prediction_and_ensembling_pipeline(
-            fold_work_dirs=fold_dirs_to_predict)
-    else:
-        logger.warning(
-            "No fold directories found or specified. Skipping prediction and ensembling.")
+    result_writer.run_prediction_and_ensembling_pipeline(
+        fold_work_dirs=dirs_to_predict)
 
 
 if __name__ == "__main__":

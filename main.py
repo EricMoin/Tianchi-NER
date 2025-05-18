@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import random
 from config import Config
-from trainer import KFoldTrainer  # Updated import
+from trainer import KFoldTrainer, SingleTrainer  # Updated import
 # For reading train/dev data from dataset import NERDataset # For creating datasets for training
 # For creating DataLoaders for training
 
@@ -28,10 +28,10 @@ def main():
     set_seed(config.seed)
     os.makedirs(config.work_dir, exist_ok=True)  # Main work directory
 
-    trainer = KFoldTrainer(config=config)
-
-    # --- 2. K-Fold Training Pipeline ---
-    trainer.kfold_train()
+    # trainer = KFoldTrainer(config=config)
+    # trainer.kfold_train()
+    trainer = SingleTrainer(config=config)
+    trainer.train()
 
 
 if __name__ == "__main__":

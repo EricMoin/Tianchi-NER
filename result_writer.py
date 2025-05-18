@@ -13,6 +13,28 @@ class ResultWriter:
     def __init__(self, config: Config):
         self.config = config
 
+    def discover_work_dirs(self, main_work_dir: str, model_name_pattern: str = "*_adapted_ep*_seed*") -> list[str]:
+        """
+        发现每个适配模型的每个折叠目录
+        示例: main_work_dir/some_adapted_model_name/fold_1, main_work_dir/some_adapted_model_name/fold_2
+        """
+        discovered_paths = []  # 存储发现的路径列表
+        # 适配模型目录的路径模式，例如: result/hfl_chinese-roberta-wwm-ext_adapted_ep3_seed2024
+        model_dirs_pattern = os.path.join(
+            main_work_dir, model_name_pattern)
+        for model_dir_path in glob.glob(model_dirs_pattern):  # 遍历匹配的模型目录
+            if os.path.isdir(model_dir_path):  # 确认是目录
+                if os.path.exists(os.path.join(model_dir_path, "best_model.pt")) or \
+                        os.path.exists(os.path.join(model_dir_path, "swa_model.pt")):
+                    discovered_paths.append(
+                        model_dir_path)  # 添加到发现的路径列表
+                logger.info(
+                    f"发现有效的预测目录: {model_dir_path}")
+        if not discovered_paths:  # 如果没有找到任何目录
+            logger.warning(
+                f"在 {main_work_dir} 中未找到匹配模式的目录。")
+        return sorted(discovered_paths)  # 返回排序后的路径列表
+
     def discover_fold_work_dirs(self, main_work_dir: str, adapted_model_name_pattern: str = "*_adapted_ep*_seed*", fold_pattern: str = "fold_*") -> list[str]:
         """
         发现每个适配模型的每个折叠目录

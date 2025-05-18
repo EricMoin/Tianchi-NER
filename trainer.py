@@ -252,9 +252,10 @@ class KFoldTrainer:
         logger.info(
             f"Base directory for K-Folds of model '{self.config.model_name}': {folds_base_dir}")
 
-        multi_reader = MultiConllReader(
-            [self.config.train_file, self.config.dev_file])
-        full_data_conll = list(multi_reader.read())  # List of Sentence objects
+        multi_reader = MultiConllReader()
+        full_data_conll = list(multi_reader.read(
+            # List of Sentence objects
+            [self.config.train_file, self.config.dev_file]))
 
         kf = KFold(n_splits=self.config.k_folds, shuffle=True,
                    random_state=self.config.seed)
@@ -300,3 +301,35 @@ class KFoldTrainer:
                                    device=fold_cfg.device)
             trainer_fold.train()  # This will save best_model.pt and swa_model.pt in fold_cfg.work_dir
         logger.info("--- K-Fold Training Pipeline Finished ---")
+
+
+class SingleTrainer:
+    def __init__(self, config: Config):
+        self.config = config
+
+    def train(self):
+        model = AddressNER(num_labels=len(
+            self.config.label_map.labels), config=self.config)
+        self.work_dir = os.path.join(
+            self.config.work_dir, self.config.model_name)
+        os.makedirs(self.work_dir, exist_ok=True)
+        conll_reader = ConllReader()
+        train_data = list(conll_reader.read(self.config.train_file))
+        val_data = list(conll_reader.read(self.config.dev_file))
+
+        train_dataset = NERDataset(
+            train_data, model.tokenizer, self.config.label_map.label2id)
+        val_dataset = NERDataset(
+            val_data, model.tokenizer, self.config.label_map.label2id)
+        train_loader = DataLoader(
+            train_dataset, batch_size=self.config.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=self.config.batch_size,
+                                shuffle=False, num_workers=4, pin_memory=True)
+
+        # Instantiate and run trainer for this fold
+        trainer = Trainer(config=self.config,
+                          model=model,
+                          train_dataloader=train_loader,
+                          val_dataloader=val_loader,
+                          device=self.config.device)
+        trainer.train()
