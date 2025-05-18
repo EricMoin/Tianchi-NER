@@ -310,9 +310,9 @@ class SingleTrainer:
     def train(self):
         model = AddressNER(num_labels=len(
             self.config.label_map.labels), config=self.config)
-        self.work_dir = os.path.join(
+        self.config.work_dir = os.path.join(
             self.config.work_dir, self.config.model_name)
-        os.makedirs(self.work_dir, exist_ok=True)
+        os.makedirs(self.config.work_dir, exist_ok=True)
         conll_reader = ConllReader()
         train_data = list(conll_reader.read(self.config.train_file))
         val_data = list(conll_reader.read(self.config.dev_file))
