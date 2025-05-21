@@ -8,6 +8,7 @@ from tqdm import tqdm
 from transformers import get_cosine_schedule_with_warmup
 import copy
 import logging
+from sklearn.metrics import classification_report
 
 from conll_reader import ConllReader, MultiConllReader
 from dataset import NERDataset, NERTestDataset
@@ -216,6 +217,54 @@ class Trainer:
             current_val_metric = correct_eval / total_eval
             logger.info(
                 f"Epoch {epoch+1} ({os.path.basename(self.config.work_dir)}) Val Loss: {avg_eval_loss:.4f}, Val Acc: {current_val_metric:.4f}")
+
+            if total_eval > 0:
+                # Generate and log classification report
+                # Ensure all_preds_eval and all_labels_eval are flat lists of integers (label IDs)
+                # Get label names from id
+                target_names = [self.config.label_map.id2label[i] for i in sorted(
+                    list(set(all_labels_eval + all_preds_eval)))]
+                # Filter out OOD labels if any from target_names before passing to classification_report
+                # This assumes your label_map.id2label correctly maps all occurring IDs.
+                # It's also important that all_preds_eval and all_labels_eval contain numerical IDs.
+
+                # Handle cases where some labels might only appear in preds or true labels
+                # and might not be in the initial set of labels (if id2label is not exhaustive)
+                # We'll use labels present in either preds or true, and map them.
+                present_label_ids = sorted(
+                    list(set(all_labels_eval).union(set(all_preds_eval))))
+
+                # Ensure all these IDs have a mapping in id2label
+                valid_target_names = []
+                valid_label_ids_for_report = []
+
+                for label_id in present_label_ids:
+                    if label_id in self.config.label_map.id2label:
+                        valid_target_names.append(
+                            self.config.label_map.id2label[label_id])
+                        valid_label_ids_for_report.append(label_id)
+                    else:
+                        logger.warning(
+                            f"Label ID {label_id} found in predictions/gold labels but not in id2label map. Skipping for report.")
+
+                if valid_label_ids_for_report:  # Proceed only if there are valid labels to report
+                    try:
+                        report = classification_report(
+                            all_labels_eval,
+                            all_preds_eval,
+                            labels=valid_label_ids_for_report,  # Use only IDs that have a name
+                            target_names=valid_target_names,   # Corresponding names
+                            digits=4,
+                            zero_division=0  # Avoids warnings when a class has no predictions or no true samples
+                        )
+                        logger.info(
+                            f"Classification Report for Epoch {epoch+1} ({os.path.basename(self.config.work_dir)}):\n{report}")
+                    except ValueError as e:
+                        logger.error(
+                            f"Could not generate classification report: {e}. Preds: {set(all_preds_eval)}, Labels: {set(all_labels_eval)}")
+                else:
+                    logger.warning(
+                        "No valid labels found to generate classification report (all predicted/gold labels were unmappable).")
 
             if self.swa is not None:
                 self.swa.update(epoch, self.model.state_dict())
