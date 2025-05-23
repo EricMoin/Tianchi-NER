@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import torch
 from config import Config
 from conll_reader import ConllEntity
@@ -22,13 +23,6 @@ class Predictor:
         """
         self.model_config = model_init_config  # Config for AddressNER instantiation
         self.device = torch.device(self.model_config.device)
-
-        # Instantiate the model structure. Weights will be loaded per fold.
-        self.model = AddressNER(num_labels=len(self.model_config.label_map.labels),
-                                config=self.model_config)
-        self.model.to(self.device)
-        logger.info(
-            f"Predictor initialized with model structure based on: {self.model_config.model_name}, device: {self.device}")
 
     def get_predictions_for_fold(self,
                                  fold_work_dir: str,
@@ -67,8 +61,19 @@ class Predictor:
             return []  # Return empty list for this fold
 
         try:
+            model_name = re.sub(r'(/swa_model\.pt)|(/best_model\.pt)',
+                                r'', model_to_load_path)
+            model_name = re.sub(r'result/pretrained/',
+                                r'', model_name)
+            model_name = re.sub(r'_adapted_ep[\d]+_seed[\d]+',
+                                r'', model_name)
+            model_name = model_name.replace(r"_", '/')
+            self.model_config.model_name = model_name
+            self.model = AddressNER(num_labels=len(self.model_config.label_map.labels),
+                                    config=self.model_config)
             self.model.load_state_dict(torch.load(
                 model_to_load_path, map_location=self.device))
+            self.model.to(self.device)
             logger.info(
                 f"Predictor: Successfully loaded model weights from {model_to_load_path}")
         except Exception as e:
