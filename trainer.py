@@ -12,7 +12,7 @@ from sklearn.metrics import classification_report
 
 from conll_reader import ConllReader, MultiConllReader
 from dataset import NERDataset, NERTestDataset
-from model import PGD, AddressNER
+from model import FreeLB, AddressNER
 from label import LabelMap
 
 logger = logging.getLogger(__name__)
@@ -130,10 +130,18 @@ class Trainer:
         # Fold specific work_dir
         os.makedirs(self.config.work_dir, exist_ok=True)
 
-        pgd = None
-        if hasattr(self.config, 'adversarial_training_start_epoch') and self.config.adversarial_training_start_epoch >= 0:
-            pgd = PGD(self.model)
-            logger.info("PGD adversarial training is configured.")
+        freelb = None
+        if hasattr(self.config, 'adversarial_training_start_epoch') and self.config.adversarial_training_start_epoch >= 0 and self.config.use_freelb:
+            freelb = FreeLB(
+                self.model,
+                adv_lr=self.config.freelb_adv_lr,
+                adv_steps=self.config.freelb_adv_steps,
+                adv_init_mag=self.config.freelb_adv_init_mag,
+                adv_max_norm=self.config.freelb_adv_max_norm,
+                adv_norm_type=self.config.freelb_adv_norm_type,
+                base_model=self.config.freelb_base_model
+            )
+            logger.info("FreeLB adversarial training is configured.")
 
         for epoch in range(self.config.num_epochs):
             self.model.train()
@@ -147,34 +155,34 @@ class Trainer:
                 labels = batch["labels"].to(self.device)
 
                 optimizer.zero_grad()
-                loss = self.model(input_ids, attention_mask, labels)
-                loss.backward()
 
-                if pgd and epoch >= self.config.adversarial_training_start_epoch:
-                    pgd.attack(is_first_attack=True)
-                    # loss_adv_accumulation = 0 # Not used
-                    for _ in range(pgd.steps - 1):
-                        optimizer.zero_grad()
-                        loss_adv_step = self.model(
-                            input_ids, attention_mask, labels)
-                        loss_adv_step.backward()
-                        pgd.attack()
-                        # loss_adv_accumulation += loss_adv_step.item() # Not used
+                if freelb and epoch >= self.config.adversarial_training_start_epoch:
+                    # Get original embeddings for FreeLB
+                    original_embeddings = self.model.bert.embeddings.word_embeddings(
+                        input_ids)
+                    # FreeLB's .attack() method will handle its own gradient accumulation
+                    # and self.model.zero_grad() internally before its loop.
+                    adv_loss = freelb.attack(
+                        original_embeddings.detach(), attention_mask, labels)
+                    # The gradients are now accumulated in model.parameters() from FreeLB's attack.
+                    # We use adv_loss for logging, but the gradients for optimizer.step() are from FreeLB.
+                    current_loss = adv_loss  # For logging purposes
+                else:
+                    # Standard forward and backward pass if FreeLB is not active
+                    loss = self.model(input_ids, attention_mask, labels)
+                    loss.backward()
+                    current_loss = loss.item()
 
-                    optimizer.zero_grad()
-                    loss_adv_final = self.model(
-                        input_ids, attention_mask, labels)
-                    loss_adv_final.backward()
-                    pgd.restore()
-
+                # Gradient clipping and optimizer step (applies to gradients from either standard pass or FreeLB)
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), max_norm=1.0)
                 optimizer.step()
+
                 if self.scheduler:
                     self.scheduler.step()
 
-                train_loss += loss.item()
-                train_pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+                train_loss += current_loss  # Accumulate the loss for the epoch average
+                train_pbar.set_postfix({"loss": f"{current_loss:.4f}"})
 
             avg_train_loss = train_loss / \
                 len(self.train_dataloader) if len(
