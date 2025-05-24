@@ -29,6 +29,14 @@ class Config:
 
     # 训练策略相关
     adversarial_training_start_epoch: int  # 开始对抗训练的轮数
+    use_freelb: bool                       # 是否使用FreeLB对抗训练
+    freelb_adv_lr: float                   # FreeLB对抗学习率
+    freelb_adv_steps: int                  # FreeLB对抗步数
+    freelb_adv_init_mag: float             # FreeLB扰动初始大小
+    freelb_adv_max_norm: float             # FreeLB扰动最大范数
+    freelb_adv_norm_type: str              # FreeLB扰动范数类型 ('l2' or 'linf')
+    # FreeLB攻击的基础模型部分 ('bert' or 'embed')
+    freelb_base_model: str
 
     # 损失函数相关
     crf_transition_penalty: float  # CRF转移惩罚
@@ -79,6 +87,15 @@ class Config:
         # 设置训练策略相关
         self.adversarial_training_start_epoch = config_dict.get(
             'adversarial_training_start_epoch', 0)
+        self.use_freelb = config_dict.get(
+            'use_freelb', False)  # Default to False
+        self.freelb_adv_lr = config_dict.get('freelb_adv_lr', 0.03)
+        self.freelb_adv_steps = config_dict.get('freelb_adv_steps', 3)
+        self.freelb_adv_init_mag = config_dict.get('freelb_adv_init_mag', 0.05)
+        self.freelb_adv_max_norm = config_dict.get('freelb_adv_max_norm', 0.0)
+        self.freelb_adv_norm_type = config_dict.get(
+            'freelb_adv_norm_type', 'l2')
+        self.freelb_base_model = config_dict.get('freelb_base_model', 'bert')
 
         # 设置损失函数相关
         self.crf_transition_penalty = config_dict.get(
@@ -118,8 +135,11 @@ class Config:
 
 class AdaptationConfig():
     seed: int
+
     # 预训练模型名称
-    base_model_name: str
+    model_name: str
+    generator_model_name_or_path: str  # Generator model path
+    discriminator_model_name_or_path: str  # Discriminator model path
     # 领域语料文件路径
     corpus_file: str
     # 训练轮数
@@ -140,6 +160,11 @@ class AdaptationConfig():
     max_grad_norm: float
     # 掩码概率
     mask_probability: float
+    # ELECTRA specific loss weights
+    generator_loss_weight: float
+    discriminator_loss_weight: float
+    # Optional: for DataLoader
+    num_workers: int
 
     def __init__(self, config_path: str):
         # 从yaml文件加载配置
@@ -154,8 +179,13 @@ class AdaptationConfig():
         self.seed = config_dict.get('seed', 2025)
 
         # 设置配置参数
-        self.base_model_name = config_dict.get(
-            'base_model_name', 'hfl/chinese-roberta-wwm-ext')
+        self.model_name = config_dict.get(
+            'model_name', 'microsoft/deberta-v3-base')
+        self.generator_model_name_or_path = config_dict.get(
+            # Default to a small generator
+            'generator_model_name_or_path', 'prajjwal1/bert-tiny')
+        self.discriminator_model_name_or_path = config_dict.get(
+            'discriminator_model_name_or_path', 'hfl/chinese-roberta-wwm-ext')
         self.corpus_file = config_dict.get(
             'corpus_file', 'data/address.txt')
         self.num_epochs = config_dict.get('num_epochs', 3)
@@ -168,10 +198,8 @@ class AdaptationConfig():
         self.max_grad_norm = config_dict.get('max_grad_norm', 1.0)
         self.mask_probability = config_dict.get('mask_probability', 0.15)
 
-        self.adapted_model_dir = os.path.join(
-            "pretrained", f"{self.base_model_name.replace('/', '_')}_adapted_ep{self.num_epochs}_seed{self.seed}"
-        )
-        # 设置模型保存路径
-        self.adapted_model_path = os.path.join(
-            self.adapted_model_dir, "model.pt"
-        )
+        self.generator_loss_weight = config_dict.get(
+            'generator_loss_weight', 1.0)
+        self.discriminator_loss_weight = config_dict.get(
+            'discriminator_loss_weight', 50.0)
+        self.num_workers = config_dict.get('num_workers', 0)

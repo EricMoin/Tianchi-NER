@@ -85,19 +85,36 @@ class AddressNER(nn.Module):
             for param in self.bert.encoder.layer[layer_idx].parameters():
                 param.requires_grad = False
 
-    def forward(self, input_ids, attention_mask, labels=None):
-        # Apply embedding dropout directly to the input embeddings
-        if self.training:
-            # Get the embeddings
-            embeddings = self.bert.embeddings.word_embeddings(input_ids)
-            # Apply dropout to embeddings
-            embeddings = self.embedding_dropout(embeddings)
-            # Pass modified embeddings through BERT
-            outputs = self.bert(inputs_embeds=embeddings,
+    def forward(self, input_ids=None, attention_mask=None, labels=None, inputs_embeds=None):
+        if inputs_embeds is not None:
+            # If inputs_embeds are provided, use them directly
+            # Potentially apply embedding_dropout if it makes sense here, though FreeLB perturbs after initial embedding
+            if self.training and self.embedding_dropout.p > 0:
+                # It's a bit unusual to apply dropout again if FreeLB already works on embeddings.
+                # However, if the original intent was to dropout embeddings *before* BERT encoder,
+                # this could be a place. For FreeLB, usually the attack is on the clean embeddings.
+                # Let's assume FreeLB provides embeddings that are ready for BERT encoder.
+                # Or apply self.embedding_dropout(inputs_embeds) if deemed necessary.
+                pass
+            outputs = self.bert(inputs_embeds=inputs_embeds,
                                 attention_mask=attention_mask)
+        elif input_ids is not None:
+            # Original path: Apply embedding dropout directly to the input embeddings from input_ids
+            if self.training and self.embedding_dropout.p > 0:
+                # Get the embeddings
+                current_embeddings = self.bert.embeddings.word_embeddings(
+                    input_ids)
+                # Apply dropout to embeddings
+                current_embeddings = self.embedding_dropout(current_embeddings)
+                # Pass modified embeddings through BERT
+                outputs = self.bert(
+                    inputs_embeds=current_embeddings, attention_mask=attention_mask)
+            else:
+                outputs = self.bert(input_ids=input_ids,
+                                    attention_mask=attention_mask)
         else:
-            outputs = self.bert(input_ids=input_ids,
-                                attention_mask=attention_mask)
+            raise ValueError(
+                "Either input_ids or inputs_embeds must be provided.")
 
         bert_output = outputs.last_hidden_state  # [batch, seq_len, 768]
 
@@ -121,52 +138,105 @@ class AddressNER(nn.Module):
         return len(self.data)
 
 
-class PGD:
-    def __init__(self, model, epsilon=0.68, alpha=0.3, steps=2):
+class FreeLB:
+    def __init__(self, model, adv_lr=1e-1, adv_steps=3, adv_init_mag=2e-2, adv_max_norm=0.0, adv_norm_type='l2', base_model='bert'):
         self.model = model
-        self.epsilon = epsilon  # Maximum perturbation
-        self.alpha = alpha      # Step size
-        self.steps = steps      # Number of attack iterations
-        self.backup = {}
-        self.emb_backup = {}
+        self.adv_lr = adv_lr
+        self.adv_steps = adv_steps
+        self.adv_init_mag = adv_init_mag
+        self.adv_max_norm = adv_max_norm    # if 0, use adv_init_mag as the constraint
+        self.adv_norm_type = adv_norm_type
+        self.base_model = base_model  # Currently unused but kept for signature consistency
 
-    def attack(self, emb_name='bert.embeddings.word_embeddings.weight', is_first_attack=False):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and emb_name in name:
-                if is_first_attack:
-                    self.emb_backup[name] = param.data.clone()
-                    # 保存初始参数
-                    self.backup[name] = param.data.clone()
+    def attack(self, inputs_embeds, attention_mask, labels):
+        """
+        Performs FreeLB attack and accumulates gradients on model parameters.
+        inputs_embeds: The original embeddings of the input (detached).
+        """
+        # Initialize adversarial perturbation delta on the same device as inputs_embeds
+        delta = torch.zeros_like(inputs_embeds, device=inputs_embeds.device)
+        if self.adv_init_mag > 0:  # Only apply uniform noise if adv_init_mag is positive
+            delta.uniform_(-self.adv_init_mag, self.adv_init_mag)
+        delta.requires_grad = True
 
-                norm = torch.norm(param.grad)
-                if norm != 0:
-                    r_at = self.alpha * param.grad / norm
-                    param.data.add_(r_at)
+        accumulated_loss_for_log = 0.0
 
-                    # 投影回 epsilon 球
-                    param.data = self.project(name, param.data, self.epsilon)
+        # Zero out model gradients once before starting the adversarial steps.
+        # This ensures that the gradients accumulated are solely from the adversarial perturbations.
+        self.model.zero_grad()
 
-    def project(self, param_name, param_data, epsilon):
-        # 将扰动投影到epsilon球上
-        delta = param_data - self.emb_backup[param_name]
-        norm = torch.norm(delta)
-        if norm > epsilon:
-            delta = delta * epsilon / norm
-        return self.emb_backup[param_name] + delta
+        for i in range(self.adv_steps):
+            perturbed_embeds = inputs_embeds + delta
 
-    def restore(self, emb_name='bert.embeddings.word_embeddings.weight'):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and emb_name in name:
-                assert name in self.backup
-                param.data = self.backup[name]
-        self.backup = {}
+            loss_adv = self.model(
+                inputs_embeds=perturbed_embeds, attention_mask=attention_mask, labels=labels)
+            accumulated_loss_for_log += loss_adv.item()  # Log the raw loss for this step
 
-    def restore_emb(self, emb_name='bert.embeddings.word_embeddings.weight'):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and emb_name in name:
-                assert name in self.emb_backup
-                param.data = self.emb_backup[name]
-        self.emb_backup = {}
+            # Normalize loss for backward pass to average gradients across steps
+            # as specified in FreeLB algorithm (gradient is mean of grads from K steps)
+            loss_adv_normalized = loss_adv / self.adv_steps
+
+            # Zero out delta gradients for its own update step
+            if delta.grad is not None:
+                delta.grad.data.zero_()
+
+            # Accumulates gradients in self.model.parameters from this adversarial step
+            loss_adv_normalized.backward()
+
+            # Update perturbation delta
+            if delta.grad is None:  # Should not happen if loss_adv depends on delta and model has trainable params
+                # If it does, means no gradient flowed to delta, perhaps an issue with model structure or adv_steps=0
+                if self.adv_steps > 0:  # only break if we expected steps
+                    logger.warning(
+                        "Delta gradient is None during FreeLB attack, breaking early.")
+                break
+
+            # Normalize the gradient of delta before applying the learning rate
+            # Flatten to calculate norm across embedding dimensions, then unsqueeze to match delta shape
+            flat_delta_grad = delta.grad.data.flatten(1)
+            if self.adv_norm_type == 'l2':
+                delta_grad_norm = torch.norm(
+                    flat_delta_grad, p=2, dim=1, keepdim=True)
+            elif self.adv_norm_type == 'linf':  # Technically, for L-inf, update is often just sign based
+                # but FreeLB paper uses g_t / ||g_t|| for L2, let's adapt for L-inf norm constraint
+                delta_grad_norm = torch.norm(
+                    flat_delta_grad, p=float('inf'), dim=1, keepdim=True)
+            else:
+                raise ValueError("adv_norm_type must be 'l2' or 'linf'")
+
+            # Unsqueeze grad_norm to match dimensions of delta [B, S, H] from [B, 1]
+            for _ in range(len(inputs_embeds.shape) - len(delta_grad_norm.shape)):
+                delta_grad_norm = delta_grad_norm.unsqueeze(-1)
+
+            # Update delta, adding small epsilon to denominator for stability
+            delta.data = delta.data + self.adv_lr * \
+                (delta.grad.data / (delta_grad_norm + 1e-12))
+
+            # Project delta back to the norm ball
+            # Use adv_max_norm if specified, otherwise use adv_init_mag as the constraint radius
+            effective_constraint_norm = self.adv_max_norm if self.adv_max_norm > 0 else self.adv_init_mag
+
+            if effective_constraint_norm > 0:  # Only project if a positive constraint is given
+                flat_delta = delta.data.flatten(1)
+                if self.adv_norm_type == 'l2':
+                    current_delta_norm = torch.norm(
+                        flat_delta, p=2, dim=1, keepdim=True)
+                elif self.adv_norm_type == 'linf':
+                    current_delta_norm = torch.norm(
+                        flat_delta, p=float('inf'), dim=1, keepdim=True)
+
+                for _ in range(len(inputs_embeds.shape) - len(current_delta_norm.shape)):
+                    current_delta_norm = current_delta_norm.unsqueeze(-1)
+
+                # Calculate clipping coefficient: min(1, constraint_norm / current_norm)
+                clip_coef = (effective_constraint_norm /
+                             (current_delta_norm + 1e-12))
+                clip_coef = torch.min(clip_coef, torch.ones_like(clip_coef))
+                delta.data = delta.data * clip_coef
+
+        # Gradients are now accumulated in self.model.parameters().
+        # The trainer will call optimizer.step() using these gradients.
+        return accumulated_loss_for_log / self.adv_steps if self.adv_steps > 0 else 0
 
 
 class CRFAwareLoss(nn.Module):
